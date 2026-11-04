@@ -1,0 +1,7 @@
+.tools/
+.zig-cache/
+zig-out/
+*.fslite
+*.fslite-journal
+*.fslite-wal
+*.fslite-shm
