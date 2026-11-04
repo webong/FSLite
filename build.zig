@@ -30,6 +30,9 @@ pub fn build(b: *std.Build) void {
     });
     const optimize = b.standardOptimizeOption(.{});
     const static = b.addLibrary(.{ .name = "fslite", .linkage = .static, .root_module = engine(b, target, optimize) });
+    // Include compiler helpers and sanitizer handlers for native C consumers.
+    static.bundle_compiler_rt = true;
+    static.bundle_ubsan_rt = true;
     const shared = b.addLibrary(.{ .name = "fslite", .linkage = .dynamic, .root_module = engine(b, target, optimize) });
     b.installArtifact(static);
     b.installArtifact(shared);
