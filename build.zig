@@ -49,11 +49,32 @@ pub fn build(b: *std.Build) void {
         module.addCSourceFile(.{ .file = b.path("tests/random_access.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/integrity.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/transactions.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.addCSourceFile(.{ .file = b.path("tests/bench/small_files_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.addCSourceFile(.{ .file = b.path("tests/bench/streaming_writes_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.addCSourceFile(.{ .file = b.path("tests/bench/random_access_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.addCSourceFile(.{ .file = b.path("tests/bench/memory_usage_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.linkLibrary(lib);
         // Only the static test calls SQLite directly to construct foreign-format fixtures.
         if (comptime std.mem.eql(u8, name, "static")) module.addCMacro("FSLITE_TEST_SQLITE", "1");
         const exe = b.addExecutable(.{ .name = "abi-" ++ name, .root_module = module });
         const run = b.addRunArtifact(exe);
         test_step.dependOn(&run.step);
+        
+        // Add benchmark executables
+        const small_files_exe = b.addExecutable(.{ .name = "small-files-bench-" ++ name, .root_module = module });
+        const small_files_run = b.addRunArtifact(small_files_exe);
+        test_step.dependOn(&small_files_run.step);
+        
+        const streaming_exe = b.addExecutable(.{ .name = "streaming-bench-" ++ name, .root_module = module });
+        const streaming_run = b.addRunArtifact(streaming_exe);
+        test_step.dependOn(&streaming_run.step);
+        
+        const random_access_exe = b.addExecutable(.{ .name = "random-access-bench-" ++ name, .root_module = module });
+        const random_access_run = b.addRunArtifact(random_access_exe);
+        test_step.dependOn(&random_access_run.step);
+        
+        const memory_exe = b.addExecutable(.{ .name = "memory-bench-" ++ name, .root_module = module });
+        const memory_run = b.addRunArtifact(memory_exe);
+        test_step.dependOn(&memory_run.step);
     }
 }
