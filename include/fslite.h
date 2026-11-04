@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-/* Experimental ABI revision 5 adds random-access writes and truncation. Existing signatures,
+/* Experimental ABI revision 6 adds read-only integrity checking. Existing signatures,
  * layouts, status codes and kind values are unchanged and use fixed widths. */
 typedef struct fslite_volume fslite_volume;
 typedef struct fslite_writer fslite_writer;
@@ -157,6 +157,21 @@ typedef int32_t (*fslite_list_callback)(void *context, const char *name, size_t 
                                       const fslite_info *info);
 fslite_status fslite_list(fslite_volume *volume, const char *path,
                          fslite_list_callback callback, void *context);
+
+/* Read-only whole-volume integrity check: SQLite integrity/foreign keys, format
+ * markers, node types, root/parent/name/path validity, reachability, and dense
+ * chunk ownership, ordering, completeness and lengths. Returns INVALID_FORMAT
+ * for detected corruption or an unusable format schema; never repairs data.
+ * All scans share one snapshot. Inside a caller transaction this includes its
+ * uncommitted work and leaves it active, on success or ordinary check failure.
+ * Outside a transaction the check releases its read transaction before returning.
+ * Severe SQLite errors may abort a caller transaction; use in_transaction.
+ * Active writers/backups return INVALID_STATE. NULL returns INVALID_ARGUMENT.
+ * This synchronous scan can be expensive and can block commits on other handles.
+ * It does not authenticate content, prove schema provenance, or simulate recovery
+ * from power loss. Same-length content corruption may not be detectable.
+ */
+fslite_status fslite_check(fslite_volume *volume);
 
 /* One transaction per handle, no nesting. begin obtains the writer reservation.
  * All subsequent operations on this handle participate until commit/rollback.

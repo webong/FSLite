@@ -48,7 +48,7 @@ static void test_engine(void) {
     char filename[64];
     new_path(filename);
     fslite_volume *v = NULL, *other = NULL;
-    CHECK(fslite_abi_version() == 5);
+    CHECK(fslite_abi_version() == 6);
     STATUS(fslite_open(filename, 0, &v), FSLITE_INVALID_FORMAT);
     CHECK(v == NULL);
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &v));
@@ -466,8 +466,12 @@ static void test_foreign_databases(void) {
 void test_namespace(void);
 void test_backup(void);
 void test_random_access(void);
+void test_integrity(void);
+void test_transactions(void);
 
 int main(void) {
+    test_integrity();
+    test_transactions();
     test_random_access();
     test_backup();
     test_namespace();

@@ -64,5 +64,6 @@ int main() {
     fslite_write_at(nullptr, "/file", 0, nullptr, 0);
     fslite_truncate(nullptr, "/file", 0);
     fslite_backup_close(nullptr);
+    fslite_check(nullptr);
 }
 CPP

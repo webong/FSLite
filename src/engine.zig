@@ -97,6 +97,91 @@ pub const Volume = struct {
         return c.sqlite3_column_int64(stmt.ptr, 0);
     }
 
+    // The C entry point owns a savepoint spanning all scans, so they observe
+    // one snapshot (including pending work in the caller's transaction).
+    pub fn integrityCheck(self: *Volume) Error!void {
+        self.checkContents() catch |err| {
+            // Required format queries failing to compile indicate an unusable schema.
+            if (err == error.Internal and c.sqlite3_errcode(self.db) == c.SQLITE_ERROR)
+                return error.InvalidFormat;
+            return err;
+        };
+    }
+
+    fn checkContents(self: *Volume) Error!void {
+        if (try self.scalar("PRAGMA application_id") != 0x46534c54 or
+            try self.scalar("PRAGMA user_version") != 2) return error.InvalidFormat;
+        {
+            const stmt = try self.prepare("PRAGMA integrity_check");
+            defer stmt.close();
+            if (!try stmt.row()) return error.InvalidFormat;
+            const result = c.sqlite3_column_text(stmt.ptr, 0) orelse return error.OutOfMemory;
+            const len: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 0));
+            if (!std.mem.eql(u8, result[0..len], "ok") or try stmt.row()) return error.InvalidFormat;
+        }
+        try self.requireNoRows("PRAGMA foreign_key_check");
+        if (try self.scalar("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN ('nodes','chunks')") != 2)
+            return error.InvalidFormat;
+        try self.requireNoRows(
+            "SELECT 1 FROM nodes WHERE typeof(id)<>'integer' OR id<1 OR " ++
+                "typeof(kind)<>'integer' OR kind NOT IN (1,2) OR typeof(size)<>'integer' OR size<0 OR " ++
+                "(kind=2 AND size<>0) OR typeof(name)<>'text' OR " ++
+                "(id=1 AND (parent IS NOT NULL OR name<>'' OR kind<>2 OR size<>0)) OR " ++
+                "(id<>1 AND (typeof(parent)<>'integer' OR parent<1)) LIMIT 1",
+        );
+        if (try self.scalar("SELECT count(*) FROM nodes WHERE id=1") != 1) return error.InvalidFormat;
+        try self.requireNoRows("SELECT id FROM nodes GROUP BY id HAVING count(*)<>1 LIMIT 1");
+        try self.requireNoRows("SELECT parent,name FROM nodes GROUP BY parent,name COLLATE BINARY HAVING count(*)<>1 LIMIT 1");
+        try self.requireNoRows(
+            "SELECT 1 FROM nodes n LEFT JOIN nodes p ON n.parent=p.id " ++
+                "WHERE n.id<>1 AND (p.id IS NULL OR p.kind<>2) LIMIT 1",
+        );
+        {
+            const stmt = try self.prepare("SELECT name FROM nodes WHERE id<>1");
+            defer stmt.close();
+            while (try stmt.row()) {
+                const len: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 0));
+                if (len == 0 or len > 255) return error.InvalidFormat;
+                const ptr = c.sqlite3_column_text(stmt.ptr, 0) orelse return error.OutOfMemory;
+                const name = ptr[0..len];
+                if (!std.unicode.utf8ValidateSlice(name) or std.mem.indexOfScalar(u8, name, 0) != null or
+                    std.mem.indexOfScalar(u8, name, '/') != null or std.mem.eql(u8, name, ".") or
+                    std.mem.eql(u8, name, "..")) return error.InvalidFormat;
+            }
+        }
+        // Valid positive-length names bound recursion. Disconnected cycles are
+        // unreachable from root, and an overlong path excludes its entire tail.
+        if (try self.scalar(
+            "WITH RECURSIVE tree(id,bytes) AS (SELECT 1,0 UNION ALL " ++
+                "SELECT n.id,t.bytes+1+length(CAST(n.name AS BLOB)) FROM nodes n JOIN tree t ON n.parent=t.id " ++
+                "WHERE t.bytes+1+length(CAST(n.name AS BLOB))<=4096) " ++
+                "SELECT (SELECT count(*) FROM nodes)-count(*) FROM tree",
+        ) != 0) return error.InvalidFormat;
+        try self.requireNoRows(
+            "SELECT 1 FROM chunks c LEFT JOIN nodes n ON n.id=c.node_id WHERE " ++
+                "typeof(c.node_id)<>'integer' OR n.id IS NULL OR n.kind<>1 OR n.size=0 OR " ++
+                "typeof(c.chunk_index)<>'integer' OR c.chunk_index<0 OR " ++
+                "c.chunk_index>(n.size-1)/65536 OR typeof(c.data)<>'blob' LIMIT 1",
+        );
+        // Indices are now bounded by the owning file's size, avoiding arithmetic
+        // overflow even for malformed volumes near INT64_MAX.
+        try self.requireNoRows(
+            "SELECT 1 FROM chunks c JOIN nodes n ON n.id=c.node_id " ++
+                "WHERE length(c.data)<>min(65536,n.size-c.chunk_index*65536) LIMIT 1",
+        );
+        try self.requireNoRows("SELECT node_id,chunk_index FROM chunks GROUP BY node_id,chunk_index HAVING count(*)<>1 LIMIT 1");
+        try self.requireNoRows(
+            "SELECT 1 FROM nodes n LEFT JOIN (SELECT node_id,count(*) AS total FROM chunks GROUP BY node_id) c " ++
+                "ON n.id=c.node_id WHERE coalesce(c.total,0)<>n.size/65536+(n.size%65536<>0) LIMIT 1",
+        );
+    }
+
+    fn requireNoRows(self: *Volume, sql: [:0]const u8) Error!void {
+        const stmt = try self.prepare(sql);
+        defer stmt.close();
+        if (try stmt.row()) return error.InvalidFormat;
+    }
+
     pub fn inTransaction(self: *Volume) bool {
         return c.sqlite3_get_autocommit(self.db) == 0;
     }

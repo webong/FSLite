@@ -27,7 +27,7 @@ fn status(err: engine.Error) i32 {
 }
 
 export fn fslite_abi_version() u32 {
-    return 5;
+    return 6;
 }
 
 export fn fslite_status_string(code: i32) [*:0]const u8 {
@@ -166,6 +166,15 @@ export fn fslite_list(volume: ?*Volume, path: ?[*:0]const u8, callback: ?engine.
     var op = engine.Operation.start(v) catch |err| return status(err);
     defer op.deinit();
     v.list(std.mem.span(p), cb, context) catch |err| return status(err);
+    op.finish() catch |err| return status(err);
+    return 0;
+}
+
+export fn fslite_check(volume: ?*Volume) i32 {
+    const v = volume orelse return 1;
+    var op = engine.Operation.start(v) catch |err| return status(err);
+    defer op.deinit();
+    v.integrityCheck() catch |err| return status(err);
     op.finish() catch |err| return status(err);
     return 0;
 }

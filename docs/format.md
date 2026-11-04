@@ -143,4 +143,10 @@ recovery. WAL configuration is not exposed by this version.
 Inspecting volumes with SQLite tools is useful for diagnostics. Direct schema or
 data mutation is unsupported: SQL constraints enforce only part of the filesystem
 invariants. Open validates format markers and the root; read checks only requested
-content. No format migration or full integrity checker is implemented.
+content. `fslite_check` performs a whole-volume scan of SQLite integrity and foreign
+keys, markers, node types, names, parents, reachability/path limits, and dense
+chunk ownership, indices, counts, and lengths. The scan shares one savepoint
+snapshot and includes caller-transaction changes without committing them. It is
+read-only and returns INVALID_FORMAT on detected corruption; it does not repair,
+authenticate the schema/content, or migrate the format. ABI revision 6 adds this
+function without changing volume format 2.

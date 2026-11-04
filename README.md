@@ -14,13 +14,14 @@ loop, garbage collector, or background service.
 - File metadata (`id`, `size`, `kind`) and ordered directory listing.
 - Atomic rename with replacement, and removal of files or empty directories.
 - Consistent live export and incremental backups with cancellation and atomic publication.
+- Read-only whole-volume integrity checking, including hierarchy and chunk validation.
 - Explicit transactions spanning multiple file operations.
 - Per-operation savepoints, including inside an explicit transaction.
 - Persistent volumes, format/version checks, and rejection of foreign databases.
 - Bundled official SQLite 3.54.1; the host does not need to install SQLite.
 
 This is an **experimental first implementation**, not a production filesystem.
-ABI revision 5 adds random-access writes and truncation, preserving existing
+ABI revision 6 adds integrity checking, preserving existing
 function signatures, structure layouts, and status values. The on-disk format
 remains version 2. **Volume format 2 replaces the previous single-BLOB layout.**
 Version-1 volumes are rejected without modification, including with CREATE; no
@@ -241,6 +242,34 @@ the destination and its sidecar names unused until finish returns. Backup files
 are created with owner-only permissions. No overwrite, restore-in-place, format
 migration, or distributed/cross-volume transaction is provided.
 
+## Integrity checking
+
+`fslite_check(volume)` scans a consistent view of the whole volume. It checks
+SQLite integrity and foreign keys, format markers, node types, root and parent
+relationships, UTF-8 names, path lengths, reachability, and chunk ownership,
+completeness, and exact lengths. It returns `FSLITE_INVALID_FORMAT` for detected
+corruption or an unusable format schema; other failures retain their usual status.
+It reports pass/fail, not individual diagnostic records, and never repairs data.
+
+The check uses one read snapshot. Inside an explicit transaction it sees your
+pending changes and leaves the transaction active, even when it detects
+corruption. Earlier work is preserved unless SQLite itself aborts the transaction
+on a severe storage error. Outside a transaction its read snapshot is released
+before returning. An active writer or backup on the same handle returns
+`FSLITE_INVALID_STATE`.
+
+This is a synchronous full scan, with SQLite-managed working memory, and may
+block another connection's commit. It does not verify checksums of file content,
+authenticate schema provenance, or prove power-loss durability. Changes to bytes
+that leave the structure and lengths valid may be undetectable.
+
+Tests include deliberately corrupted volumes and three reproducible random seeds
+covering 432 mixed operations per linkage. An independent byte-array and namespace
+model checks writes, patches, resizes, streams, file/directory renames, removal,
+commit, rollback, close-without-commit, and visibility from a second connection.
+Failures print the seed, batch, and step. Static tests additionally inject chunk
+statement failures to verify preservation of earlier transaction work.
+
 ## Host contract
 
 The authoritative ABI is [include/fslite.h](include/fslite.h).
@@ -287,6 +316,8 @@ tests/abi.c          C consumer integration tests
 tests/namespace.c    Rename/removal and transaction tests
 tests/backup.c       Snapshot, cancellation, publication and failure tests
 tests/random_access.c Offset writes, truncation, byte-array model and failure tests
+tests/integrity.c    Corrupt-volume and check transaction-lifecycle tests
+tests/transactions.c Reproducible randomized transactional model tests
 examples/basic.c     Minimal host application
 examples/stream.c    Bounded-buffer stdin import
 examples/backup.c    Live export to a new volume file
