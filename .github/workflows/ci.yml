@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: ${{ matrix.os }} / ${{ matrix.optimize }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        optimize: [Debug, ReleaseSafe]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+          cache-key: ${{ matrix.optimize }}
+
+      - name: Verify compiler version and formatting
+        run: |
+          test "$(zig version)" = "$(cat .zig-version)"
+          zig fmt --check build.zig src/*.zig
+
+      - name: Build and test static and shared libraries
+        run: zig build test install -Doptimize=${{ matrix.optimize }}
+
+      - name: Test native C consumers and C++ header compatibility
+        run: bash ci/smoke.sh

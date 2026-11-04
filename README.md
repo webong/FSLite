@@ -76,6 +76,21 @@ not simulate hardware power loss. Random-access tests compare mixed writes and
 resizes with an independent byte-array model, audit which chunks change, and
 verify rollback on chunk/metadata failures, contention, and process exit.
 
+## Continuous integration
+
+[GitHub Actions](https://github.com/webong/fslite/actions/workflows/ci.yml) builds
+and tests every push and pull request, with optional manual runs. The matrix
+covers Ubuntu 24.04 and macOS 15 in Debug and ReleaseSafe modes, using the Zig
+version in `.zig-version`. Each job checks formatting, builds and tests both
+libraries, and runs native C examples against the static and shared artifacts.
+It also verifies exported volumes and C++ compatibility of the public header.
+
+Run the native-consumer checks locally after building:
+
+```sh
+bash ci/smoke.sh
+```
+
 ## Use from C
 
 ```c
@@ -220,8 +235,8 @@ the same path. Other publication failures do not create a destination. Source
 transactions are never committed or rolled back by backup.
 
 Publication currently targets POSIX local filesystems supporting hard links and
-directory fsync; macOS is tested, Linux runtime validation is pending, and Windows
-returns UNSUPPORTED. Keep the destination parent stable and trusted, and leave
+directory fsync; CI covers macOS and Linux, while Windows returns UNSUPPORTED.
+Keep the destination parent stable and trusted, and leave
 the destination and its sidecar names unused until finish returns. Backup files
 are created with owner-only permissions. No overwrite, restore-in-place, format
 migration, or distributed/cross-volume transaction is provided.
