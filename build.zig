@@ -49,32 +49,45 @@ pub fn build(b: *std.Build) void {
         module.addCSourceFile(.{ .file = b.path("tests/random_access.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/integrity.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/transactions.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/bench/small_files_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/bench/streaming_writes_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/bench/random_access_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/bench/memory_usage_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.linkLibrary(lib);
         // Only the static test calls SQLite directly to construct foreign-format fixtures.
         if (comptime std.mem.eql(u8, name, "static")) module.addCMacro("FSLITE_TEST_SQLITE", "1");
         const exe = b.addExecutable(.{ .name = "abi-" ++ name, .root_module = module });
         const run = b.addRunArtifact(exe);
         test_step.dependOn(&run.step);
-        
-        // Add benchmark executables
-        const small_files_exe = b.addExecutable(.{ .name = "small-files-bench-" ++ name, .root_module = module });
-        const small_files_run = b.addRunArtifact(small_files_exe);
-        test_step.dependOn(&small_files_run.step);
-        
-        const streaming_exe = b.addExecutable(.{ .name = "streaming-bench-" ++ name, .root_module = module });
-        const streaming_run = b.addRunArtifact(streaming_exe);
-        test_step.dependOn(&streaming_run.step);
-        
-        const random_access_exe = b.addExecutable(.{ .name = "random-access-bench-" ++ name, .root_module = module });
-        const random_access_run = b.addRunArtifact(random_access_exe);
-        test_step.dependOn(&random_access_run.step);
-        
-        const memory_exe = b.addExecutable(.{ .name = "memory-bench-" ++ name, .root_module = module });
-        const memory_run = b.addRunArtifact(memory_exe);
-        test_step.dependOn(&memory_run.step);
+    }
+
+    const bench_build = b.step("build-bench", "Install standalone static/shared benchmark executables");
+    bench_build.dependOn(b.getInstallStep());
+    const bench_step = b.step("bench", "Run full benchmarks sequentially (use ReleaseSafe)");
+    const smoke_step = b.step("bench-smoke", "Run short benchmark correctness checks sequentially");
+    var previous_bench: ?*std.Build.Step = null;
+    var previous_smoke: ?*std.Build.Step = null;
+    inline for (.{ static, shared }, .{ "static", "shared" }) |lib, linkage| {
+        inline for (.{ "small_files", "streaming_writes", "random_access", "memory_usage" }) |name| {
+            const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+            module.addIncludePath(b.path("include"));
+            module.addCMacro("FSLITE_BENCH_LINKAGE", "\"" ++ linkage ++ "\"");
+            module.addCMacro("FSLITE_BENCH_OPTIMIZE", b.fmt("\"{s}\"", .{@tagName(optimize)}));
+            module.addCSourceFile(.{ .file = b.path("tests/bench/" ++ name ++ "_bench.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.linkLibrary(lib);
+            const exe = b.addExecutable(.{ .name = name ++ "-bench-" ++ linkage, .root_module = module });
+            const install = b.addInstallArtifact(exe, .{});
+            bench_build.dependOn(&install.step);
+            // These benchmarks write durable volumes; avoid competing disk workloads.
+            const run = b.addRunArtifact(exe);
+            run.has_side_effects = true;
+            run.step.dependOn(bench_build);
+            if (previous_bench) |previous| run.step.dependOn(previous);
+            previous_bench = &run.step;
+            bench_step.dependOn(&run.step);
+            const smoke = b.addRunArtifact(exe);
+            smoke.addArg("--smoke");
+            smoke.has_side_effects = true;
+            smoke.step.dependOn(bench_build);
+            if (previous_smoke) |previous| smoke.step.dependOn(previous);
+            previous_smoke = &smoke.step;
+            smoke_step.dependOn(&smoke.step);
+        }
     }
 }

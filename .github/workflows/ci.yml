@@ -51,3 +51,6 @@ jobs:
 
       - name: Test native C consumers and C++ header compatibility
         run: bash ci/smoke.sh
+
+      - name: Smoke-test benchmark workloads
+        run: zig build bench-smoke -Doptimize=${{ matrix.optimize }}

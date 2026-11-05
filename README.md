@@ -92,6 +92,27 @@ Run the native-consumer checks locally after building:
 bash ci/smoke.sh
 ```
 
+## Benchmarks
+
+Run the four benchmark suites against both static and shared libraries:
+
+```sh
+zig build bench -Doptimize=ReleaseSafe
+```
+
+For quick correctness checks use `zig build bench-smoke -Doptimize=ReleaseSafe`.
+CI runs smoke workloads in both build modes on macOS and Linux, without timing
+thresholds. `zig build test` runs only integration tests. Benchmarks use private
+temporary volumes, honor `TMPDIR`, and clean them up on normal completion or a
+reported failure. Full runs can take minutes and use several hundred MiB of disk.
+
+The suites cover small-file creation/replacement, streaming with bounded buffers,
+seeded random-access patches, and process peak RSS as streamed file size grows.
+They retain SQLite's normal durable transaction settings, include commits in the
+write timing, and verify persisted data outside the timed region. See
+[docs/benchmarks.md](docs/benchmarks.md) for workloads, commands, and measurement
+limitations.
+
 ## Use from C
 
 ```c
@@ -299,7 +320,7 @@ The authoritative ABI is [include/fslite.h](include/fslite.h).
 ## Next milestones
 
 1. Broader fault-injection and concurrent workloads; optional recursive removal.
-2. File-size/I/O benchmarks, explicit format migration, and optional sparse storage.
+2. Benchmark baselines across hardware, explicit format migration, and optional sparse storage.
 3. Richer metadata, configurable limits, diagnostics, and backup-platform coverage.
 4. C ABI compatibility tests across platforms and release packaging.
 5. Optional bindings, CLI, filesystem mounts, and browser storage integration.
