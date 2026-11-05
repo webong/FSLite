@@ -265,3 +265,56 @@ export fn fslite_export(volume: ?*Volume, destination: ?[*:0]const u8) i32 {
     backup.finish() catch |err| return status(err);
     return 0;
 }
+
+// =============================================================================
+// Performance API - C ABI exports
+// =============================================================================
+
+export fn fslite_cache_get_hit_ratio(volume: ?*Volume) f64 {
+    const v = volume orelse return 0.0;
+    return v.cache_stats.hitRatio();
+}
+
+export fn fslite_cache_get_hits(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.cache_stats.hits;
+}
+
+export fn fslite_cache_get_misses(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.cache_stats.misses;
+}
+
+export fn fslite_cache_get_evictions(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.cache_stats.evictions;
+}
+
+export fn fslite_cache_get_size(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.cache_stats.current_size;
+}
+
+export fn fslite_cache_get_memory_usage(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.cache_stats.memoryUsage();
+}
+
+export fn fslite_cache_reset_stats(volume: ?*Volume) i32 {
+    const v = volume orelse return 1;
+    v.cache_stats.hits = 0;
+    v.cache_stats.misses = 0;
+    v.cache_stats.evictions = 0;
+    v.cache_stats.current_size = 0;
+    return 0;
+}
+
+export fn fslite_cache_get_dashboard_cache_hit_ratio(volume: ?*Volume) f64 {
+    const v = volume orelse return 0.0;
+    return v.performance_dashboard.cache_hit_ratio;
+}
+
+export fn fslite_cache_get_dashboard_memory_usage(volume: ?*Volume) u64 {
+    const v = volume orelse return 0;
+    return v.performance_dashboard.memory_usage_bytes;
+}

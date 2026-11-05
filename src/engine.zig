@@ -106,6 +106,28 @@ pub const Volume = struct {
         self.last_adapt_time_us = current_time_us;
     }
 
+    /// Pre-compile frequently used SQL statements to warm up SQLite's internal
+    /// cache. Safe to call multiple times; subsequent calls are inexpensive.
+    pub fn warmupCache(self: *Volume) void {
+        const statements = [_][]const u8{
+            "SELECT id,kind,size FROM nodes WHERE parent=?1 AND name=?2",
+            "INSERT INTO nodes(parent,name,kind,size) VALUES(?1,?2,2,0)",
+            "DELETE FROM nodes WHERE id=?1",
+            "UPDATE nodes SET parent=?2,name=?3 WHERE id=?1",
+            "UPDATE nodes SET size=?2 WHERE id=?1",
+            "INSERT INTO chunks(node_id,chunk_index,data) VALUES(?1,?2,?3)",
+            "SELECT data FROM chunks WHERE node_id=?1 AND chunk_index=?2",
+            "SELECT chunk_index,data FROM chunks WHERE node_id=?1 AND chunk_index BETWEEN ?2 AND ?3 ORDER BY chunk_index",
+            "SELECT id,kind,size,name FROM nodes WHERE parent=?1 ORDER BY name COLLATE BINARY",
+            "DELETE FROM chunks WHERE node_id=?1 AND chunk_index>=?2",
+            "SELECT 1 FROM nodes WHERE parent=?1 LIMIT 1",
+        };
+        for (statements) |sql| {
+            const stmt = self.prepare(sql) catch continue;
+            stmt.close();
+        }
+    }
+
     fn scalar(self: *Volume, sql: [:0]const u8) Error!i64 {
         const stmt = try self.prepare(sql);
         defer stmt.close();
@@ -779,7 +801,10 @@ pub const CacheStats = struct {
 
     pub fn hitRatio(self: CacheStats) f64 {
         const total = self.hits + self.misses;
-        return if (total == 0) 0.0 else @as(f64, self.hits) / @as(f64, total);
+        if (total == 0) return 0.0;
+        const h: f64 = @bitCast(self.hits);
+        const t: f64 = @bitCast(total);
+        return h / t;
     }
 
     pub fn memoryUsage(self: CacheStats) usize {

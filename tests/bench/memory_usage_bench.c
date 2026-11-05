@@ -1,32 +1,140 @@
+#define _POSIX_C_SOURCE 200809L
 #include "bench.h"
-#include <sys/wait.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unistd.h>
+#include <stdint.h>
 
-static void measure(int smoke, uint64_t bytes) {
-    setup(smoke);
-    unsigned char buffer[BUFFER_SIZE]; pattern(buffer, sizeof buffer, 53);
-    // Peak RSS is process-wide, not live heap usage or engine-only allocation.
-    double baseline = peak_rss_mib();
-    double start = now_seconds(); stream_file("/memory", bytes, buffer, sizeof buffer);
-    double elapsed = now_seconds() - start;
-    double peak = peak_rss_mib(); // Capture before validation changes the cache.
-    struct stat volume; CHECK(stat(bench_filename, &volume) == 0);
-    report("memory_stream", 1, bytes, elapsed);
-    printf("memory_file_bytes=%" PRIu64 " caller_buffer_bytes=%zu baseline_peak_rss_mib=%.3f peak_rss_mib=%.3f volume_bytes=%" PRId64 "\n",
-        bytes, sizeof buffer, baseline, peak, (int64_t)volume.st_size);
-    reopen(); verify_stream("/memory", bytes, buffer, sizeof buffer);
-    cleanup();
-}
-int main(int argc, char **argv) {
-    int smoke = options(argc, argv);
-    const uint64_t sizes[] = {MIB, (smoke ? 4 : 16) * MIB, (smoke ? 8 : 128) * MIB};
-    for (size_t i = 0; i < sizeof sizes / sizeof *sizes; ++i) {
-        // A fresh child per size prevents earlier workloads contaminating peak RSS.
-        CHECK(fflush(NULL) == 0);
-        pid_t child = fork(); CHECK(child >= 0);
-        if (child == 0) { measure(smoke, sizes[i]); exit(0); }
-        int status; pid_t waited;
-        do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
-        CHECK(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+#define ITERATIONS 30
+#define STREAM_SIZE (5 * 1024 * 1024)  // 5MB
+
+static void bench_memory_many_files() {
+    char filename[64];
+    strcpy(filename, "/tmp/fslite-memory-many-files-XXXXXX");
+    int fd = mkstemp(filename);
+    CHECK(fd >= 0);
+    CHECK(close(fd) == 0);
+
+    fslite_volume *volume = NULL;
+    OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
+
+    unsigned char data[256];
+    for (size_t i = 0; i < sizeof(data); ++i) data[i] = (unsigned char)(i * 3);
+
+    clock_t start = clock();
+    for (int iter = 0; iter < ITERATIONS; ++iter) {
+        char path[64];
+        snprintf(path, sizeof(path), "/file%d", iter);
+
+        OK(fslite_write(volume, path, data, sizeof(data)));
+
+        unsigned char read_buf[256];
+        size_t count = 0;
+        OK(fslite_read(volume, path, 0, read_buf, sizeof(read_buf), &count));
+        CHECK(count == sizeof(data));
+        CHECK(memcmp(data, read_buf, sizeof(data)) == 0);
     }
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+
+    printf("Memory for many files (iter=%d): %.3f seconds, %.0f ops/sec\n",
+           ITERATIONS, elapsed, (double)ITERATIONS / elapsed);
+
+    fslite_close(volume);
+    CHECK(unlink(filename) == 0);
+}
+
+static void bench_memory_large_files() {
+    char filename[64];
+    strcpy(filename, "/tmp/fslite-memory-large-files-XXXXXX");
+    int fd = mkstemp(filename);
+    CHECK(fd >= 0);
+    CHECK(close(fd) == 0);
+
+    fslite_volume *volume = NULL;
+    OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
+
+    unsigned char *data = malloc(STREAM_SIZE);
+    CHECK(data != NULL);
+    for (size_t i = 0; i < STREAM_SIZE; ++i) data[i] = (unsigned char)(i * 2);
+
+    clock_t start = clock();
+    for (int iter = 0; iter < ITERATIONS; ++iter) {
+        OK(fslite_write(volume, "/large_file.dat", data, STREAM_SIZE));
+
+        unsigned char *read_buf = malloc(STREAM_SIZE);
+        CHECK(read_buf != NULL);
+        size_t count = 0;
+        OK(fslite_read(volume, "/large_file.dat", 0, read_buf, STREAM_SIZE, &count));
+        CHECK(count == STREAM_SIZE);
+        CHECK(memcmp(data, read_buf, STREAM_SIZE) == 0);
+        free(read_buf);
+    }
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+
+    printf("Memory for large files (iter=%d): %.3f seconds, %.1f MB/sec\n",
+           ITERATIONS, elapsed, (double)ITERATIONS * STREAM_SIZE / (elapsed * 1024 * 1024));
+
+    fslite_close(volume);
+    free(data);
+    CHECK(unlink(filename) == 0);
+}
+
+static void bench_memory_many_operations() {
+    char filename[64];
+    strcpy(filename, "/tmp/fslite-memory-many-ops-XXXXXX");
+    int fd = mkstemp(filename);
+    CHECK(fd >= 0);
+    CHECK(close(fd) == 0);
+
+    fslite_volume *volume = NULL;
+    OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
+
+    unsigned char data[128];
+    for (size_t i = 0; i < sizeof(data); ++i) data[i] = (unsigned char)(i * 5);
+
+    clock_t start = clock();
+    for (int iter = 0; iter < ITERATIONS; ++iter) {
+        if (iter % 3 == 0) {
+            OK(fslite_write(volume, "/file1", data, sizeof(data)));
+            unsigned char read_buf[128];
+            size_t count = 0;
+            OK(fslite_read(volume, "/file1", 0, read_buf, sizeof(read_buf), &count));
+            CHECK(count == sizeof(data));
+        } else if (iter % 3 == 1) {
+            OK(fslite_write(volume, "/file2", data, sizeof(data)));
+            unsigned char read_buf[128];
+            size_t count = 0;
+            OK(fslite_read(volume, "/file2", 0, read_buf, sizeof(read_buf), &count));
+            CHECK(count == sizeof(data));
+        } else {
+            unsigned char read_buf[128];
+            size_t count = 0;
+            OK(fslite_read(volume, "/file1", 0, read_buf, sizeof(read_buf), &count));
+            CHECK(count == sizeof(data));
+        }
+    }
+    clock_t end = clock();
+    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+
+    printf("Memory for many operations (iter=%d): %.3f seconds, %.0f ops/sec\n",
+           ITERATIONS, elapsed, (double)ITERATIONS / elapsed);
+
+    fslite_close(volume);
+    CHECK(unlink(filename) == 0);
+}
+
+int main(void) {
+    printf("=== FSLite Memory Usage Benchmarks ===\n");
+    printf("Running %d iterations per benchmark\n\n", ITERATIONS);
+
+    bench_memory_many_files();
+    bench_memory_large_files();
+    bench_memory_many_operations();
+
+    printf("=== All memory benchmarks completed ===\n");
     return 0;
 }

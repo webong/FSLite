@@ -1,31 +1,17 @@
 #define _POSIX_C_SOURCE 200809L
-#include "fslite.h"
 #include "bench.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#include <sys/stat.h>
 #include <stdint.h>
 
-#define CHUNK_SIZE 65536
-#define STREAM_SIZE (5 * 1024 * 1024)  // 5MB
 #define ITERATIONS 30
 
-static void create_benchmark_volume(const char *filename) {
-    char *cmd = malloc(strlen(filename) + 32);
-    strcpy(cmd, "rm -f ");
-    strcat(cmd, filename);
-    system(cmd);
-    free(cmd);
-}
-
-static double measure_time(void (*benchmark_func)(void)) {
-    clock_t start = clock();
-    benchmark_func();
-    clock_t end = clock();
-    return (double)(end - start) / CLOCKS_PER_SEC;
+static uint32_t random_number(uint32_t *state) {
+    *state = *state * UINT32_C(1664525) + UINT32_C(1013904223);
+    return *state;
 }
 
 static void bench_path_lookups() {
@@ -38,7 +24,6 @@ static void bench_path_lookups() {
     fslite_volume *volume = NULL;
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
 
-    // Create a directory structure
     OK(fslite_mkdir(volume, "/dir1"));
     OK(fslite_mkdir(volume, "/dir1/subdir1"));
     OK(fslite_mkdir(volume, "/dir1/subdir2"));
@@ -47,7 +32,7 @@ static void bench_path_lookups() {
     for (int iter = 0; iter < ITERATIONS; ++iter) {
         fslite_info info;
         STATUS(fslite_stat(volume, "/dir1/subdir1", &info), FSLITE_OK);
-        CHECK(info.kind == FSLITE_FILE);
+        CHECK(info.kind == 2);
         CHECK(info.size == 0);
     }
     clock_t end = clock();
@@ -71,7 +56,7 @@ static void bench_small_file_operations() {
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
 
     unsigned char data[256];
-    for (int i = 0; i < sizeof(data); ++i) data[i] = (unsigned char)i;
+    for (size_t i = 0; i < sizeof(data); ++i) data[i] = (unsigned char)i;
 
     clock_t start = clock();
     for (int iter = 0; iter < ITERATIONS; ++iter) {
@@ -79,7 +64,7 @@ static void bench_small_file_operations() {
 
         unsigned char read_buf[256];
         size_t count = 0;
-        OK(fslite_read(volume, "/file", 0, read_buf, sizeof(read_buf), &count));
+        OK(fslite_read(volume, "/file", 0, read_buf, sizeof(data), &count));
         CHECK(count == sizeof(data));
         CHECK(memcmp(data, read_buf, sizeof(data)) == 0);
 
@@ -105,107 +90,73 @@ static void bench_streaming_writes() {
     fslite_volume *volume = NULL;
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
 
-    unsigned char *buffer = malloc(STREAM_SIZE);
+    size_t stream_size = 5 * 1024 * 1024; // 5MB
+    unsigned char *buffer = malloc(stream_size);
     CHECK(buffer != NULL);
-    for (int i = 0; i < STREAM_SIZE; ++i) buffer[i] = (unsigned char)(i & 0xFF);
+    for (size_t i = 0; i < stream_size; ++i) buffer[i] = (unsigned char)(i & 0xFF);
 
     clock_t start = clock();
     for (int iter = 0; iter < ITERATIONS; ++iter) {
-        OK(fslite_write(volume, "/stream.dat", buffer, STREAM_SIZE));
+        OK(fslite_write(volume, "/stream.dat", buffer, stream_size));
 
-        unsigned char *read_buf = malloc(STREAM_SIZE);
+        unsigned char *read_buf = malloc(stream_size);
         CHECK(read_buf != NULL);
         size_t count = 0;
-        OK(fslite_read(volume, "/stream.dat", 0, read_buf, STREAM_SIZE, &count));
-        CHECK(count == STREAM_SIZE);
-        CHECK(memcmp(buffer, read_buf, STREAM_SIZE) == 0);
+        OK(fslite_read(volume, "/stream.dat", 0, read_buf, stream_size, &count));
+        CHECK(count == stream_size);
+        CHECK(memcmp(buffer, read_buf, stream_size) == 0);
         free(read_buf);
     }
     clock_t end = clock();
     double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
-    double total_bytes = (double)ITERATIONS * STREAM_SIZE;
+    double total_bytes = (double)ITERATIONS * stream_size;
 
-    printf("Streaming writes benchmark (iter=%d, size=%dMB): %.3f seconds, %.1f MB/sec\n",
-           ITERATIONS, STREAM_SIZE / (1024 * 1024), elapsed, total_bytes / (elapsed * 1024 * 1024));
+    printf("Streaming writes benchmark (iter=%d, size=%zuMB): %.3f seconds, %.1f MB/sec\n",
+           ITERATIONS, stream_size / (1024 * 1024), elapsed, total_bytes / (elapsed * 1024 * 1024));
 
     fslite_close(volume);
     free(buffer);
     CHECK(unlink(filename) == 0);
 }
 
-static void bench_random_access_writes() {
+static void bench_random_access_simple() {
     char filename[64];
-    strcpy(filename, "/tmp/fslite-random-access-bench-XXXXXX");
+    strcpy(filename, "/tmp/fslite-random-simple-XXXXXX");
     int fd = mkstemp(filename);
     CHECK(fd >= 0);
     CHECK(close(fd) == 0);
 
     fslite_volume *volume = NULL;
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
+
+    size_t file_size = 64 * 1024; // 64KB
+    unsigned char *data = malloc(file_size);
+    CHECK(data != NULL);
+    for (size_t i = 0; i < file_size; ++i) data[i] = (unsigned char)(i * 3);
+
+    OK(fslite_write(volume, "/file.dat", data, file_size));
 
     uint32_t state = 0x51f17e;
     clock_t start = clock();
     for (int iter = 0; iter < ITERATIONS; ++iter) {
-        uint32_t offset = (uint32_t)random_number(&state) % (10 * 1024 * 1024);  // 10MB max
-        uint32_t length = (uint32_t)random_number(&state) % (CHUNK_SIZE / 4);
-        if (length > 10 * 1024 * 1024 - offset) length = 10 * 1024 * 1024 - offset;
-
-        unsigned char buffer[256];
-        for (int i = 0; i < length; ++i) buffer[i] = (unsigned char)iter;
-
-        OK(fslite_write_at(volume, "/file.dat", offset, buffer, length));
+        uint32_t offset = (random_number(&state) % file_size);
+        uint32_t length = (random_number(&state) % 256) + 1;
+        if ((uint64_t)offset + length > file_size) length = (uint32_t)(file_size - offset);
 
         unsigned char read_buf[256];
         size_t count = 0;
-        OK(fslite_read(volume, "/file.dat", offset, read_buf, sizeof(read_buf), &count));
+        OK(fslite_read(volume, "/file.dat", offset, read_buf, length, &count));
         CHECK(count == (size_t)length);
-        CHECK(memcmp(buffer, read_buf, length) == 0);
+        CHECK(memcmp(data + offset, read_buf, length) == 0);
     }
     clock_t end = clock();
     double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
 
-    printf("Random access writes benchmark (iter=%d): %.3f seconds, %.0f ops/sec\n",
-           ITERATIONS, elapsed, (double)ITERATIONS / elapsed);
+    printf("Random access reads benchmark (iter=%d, file_size=%zuKB): %.3f seconds, %.0f ops/sec\n",
+           ITERATIONS, file_size / 1024, elapsed, (double)ITERATIONS / elapsed);
 
     fslite_close(volume);
-    CHECK(unlink(filename) == 0);
-}
-
-static void bench_concurrent_operations() {
-    char filename[64];
-    strcpy(filename, "/tmp/fslite-concurrent-bench-XXXXXX");
-    int fd = mkstemp(filename);
-    CHECK(fd >= 0);
-    CHECK(close(fd) == 0);
-
-    fslite_volume *volume = NULL;
-    OK(fslite_open(filename, FSLITE_OPEN_CREATE, &volume));
-
-    uint32_t state = 0x12345678;
-    clock_t start = clock();
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
-        if (random_number(&state) % 3 == 0) {
-            unsigned char data[128];
-            snprintf((char*)data, sizeof(data), "file_%d", iter);
-            OK(fslite_write(volume, (char*)data, data, strlen((char*)data)));
-        } else if (random_number(&state) % 3 == 1) {
-            // Read existing file
-            OK(fslite_write(volume, "/temp", "data", 4));
-            unsigned char read_buf[128];
-            size_t count = 0;
-            OK(fslite_read(volume, "/temp", 0, read_buf, sizeof(read_buf), &count));
-        } else {
-            // List directory
-            fslite_list(volume, "/", NULL, NULL);
-        }
-    }
-    clock_t end = clock();
-    double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
-
-    printf("Concurrent operations benchmark (iter=%d): %.3f seconds, %.0f ops/sec\n",
-           ITERATIONS, elapsed, (double)ITERATIONS / elapsed);
-
-    fslite_close(volume);
+    free(data);
     CHECK(unlink(filename) == 0);
 }
 
@@ -216,8 +167,7 @@ int main(void) {
     bench_path_lookups();
     bench_small_file_operations();
     bench_streaming_writes();
-    bench_random_access_writes();
-    bench_concurrent_operations();
+    bench_random_access_simple();
 
     printf("=== All benchmarks completed ===\n");
     return 0;

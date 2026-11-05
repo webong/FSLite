@@ -54,3 +54,8 @@ jobs:
 
       - name: Smoke-test benchmark workloads
         run: zig build bench-smoke -Doptimize=${{ matrix.optimize }}
+
+      - name: Benchmark regression check
+        run: |
+          zig build bench -Doptimize=${{ matrix.optimize }}
+          bash ci/benchmark-regression.sh

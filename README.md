@@ -113,6 +113,87 @@ write timing, and verify persisted data outside the timed region. See
 [docs/benchmarks.md](docs/benchmarks.md) for workloads, commands, and measurement
 limitations.
 
+## Performance Monitoring and Configuration
+
+FSLite includes a Performance API for monitoring cache effectiveness and tuning
+the adaptive cache system. The API is exposed through the Zig engine module
+(`engine.zig`) and can be used by language bindings and host applications that
+consume the Zig API directly.
+
+### Performance API (Zig-level)
+
+The `PerformanceAPI` struct provides read-only access to cache statistics:
+
+```zig
+const perf = PerformanceAPI.init(volume);
+const hit_ratio = perf.getCacheHitRatio();           // 0.0 to 1.0
+const hits = perf.getCacheHits();
+const misses = perf.getCacheMisses();
+const evictions = perf.getCacheEvictions();
+const cache_size = perf.getCacheSize();
+const memory_bytes = perf.getCacheMemoryUsage();
+const dashboard = perf.getPerformanceDashboard();
+const cache_status = perf.getAdaptiveCacheStatus();
+perf.resetStats();                                     // Clear counters
+const json = perf.toJSON();                           // JSON export
+```
+
+### Cache Configuration
+
+Cache behavior can be tuned through `CacheConfig`:
+
+```zig
+const config = CacheConfig.fromEnvironment();          // Read from env vars
+// Or set manually:
+var config = CacheConfig.default();
+config.max_cache_size = 2048;
+config.enable_adaptive_sizing = true;
+config.hit_ratio_threshold_high = 0.85;
+config.hit_ratio_threshold_low = 0.40;
+config.apply(volume);
+```
+
+Environment variables:
+- `FSLITE_CACHE_MAX_SIZE` - Maximum cached statements (default: 1024)
+- `FSLITE_CACHE_MIN_SIZE` - Minimum cached statements (default: 16)
+- `FSLITE_CACHE_ADAPTIVE` - Enable automatic cache resizing (default: true)
+- `FSLITE_CACHE_STATS` - Enable statistics collection (default: true)
+- `FSLITE_CACHE_MONITORING` - Enable performance monitoring (default: true)
+
+### Debug Tools
+
+The `CacheDebugger` provides performance analysis and recommendations:
+
+```zig
+const debugger = CacheDebugger.init(volume);
+const analysis = debugger.analyzePerformance();
+// analysis.efficiency: 0.0 to 1.0
+// analysis.recommendation: human-readable suggestion
+const viz = debugger.visualizeCache();                 // Cache state summary
+```
+
+### CI/CD Integration
+
+The `PerformanceRegressionTester` validates that performance doesn't regress
+against a known baseline:
+
+```zig
+const tester = PerformanceRegressionTester.init(0.90, 1024 * 1024);
+const result = tester.checkRegression(current_hit_ratio, current_memory);
+// result.passed: true if within tolerance
+// result.message: human-readable status
+const report = tester.generateReport();                // Text report
+```
+
+The `BenchmarkRunner` measures operation throughput:
+
+```zig
+const runner = BenchmarkRunner.init(30, 5);            // 30 iterations, 5 warmup
+const result = runner.runBenchmark("my_op", &my_func);
+// result.operations_per_second: measured throughput
+runner.printResults(result);
+```
+
 ## Use from C
 
 ```c
