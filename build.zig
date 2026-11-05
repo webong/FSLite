@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
     var previous_bench: ?*std.Build.Step = null;
     var previous_smoke: ?*std.Build.Step = null;
     inline for (.{ static, shared }, .{ "static", "shared" }) |lib, linkage| {
-        inline for (.{ "small_files", "streaming_writes", "random_access", "memory_usage", "full_performance" }) |name| {
+        inline for (.{ "small_files", "streaming_writes", "random_access", "memory_usage", "full_performance", "large_files" }) |name| {
             const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
             module.addIncludePath(b.path("include"));
             module.addCMacro("FSLITE_BENCH_LINKAGE", "\"" ++ linkage ++ "\"");

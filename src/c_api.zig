@@ -328,3 +328,61 @@ export fn fslite_cache_get_dashboard_memory_usage(volume: ?*Volume) u64 {
     const v = volume orelse return 0;
     return v.performance_dashboard.memory_usage_bytes;
 }
+
+// =============================================================================
+// Volume migration - C ABI exports
+// =============================================================================
+
+export fn fslite_migrate(volume: ?[*:0]const u8) i32 {
+    const path = volume orelse return 1;
+    var db: ?*engine.c.sqlite3 = null;
+    const flags: c_int = engine.c.SQLITE_OPEN_READWRITE | engine.c.SQLITE_OPEN_FULLMUTEX;
+    const rc = engine.c.sqlite3_open_v2(path, &db, flags, null);
+    if (rc != engine.c.SQLITE_OK) {
+        if (db) |conn| _ = engine.c.sqlite3_close_v2(conn);
+        return 1;
+    }
+    defer _ = engine.c.sqlite3_close_v2(db);
+    if (rc != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+    if (engine.c.sqlite3_busy_timeout(db, 1000) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+    if (engine.c.sqlite3_exec(db, "PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;", null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+
+    const db_nonnull = db orelse return 1;
+    const app = c_api_scalar(db_nonnull, "PRAGMA application_id") catch |e| return status(e);
+    const version = c_api_scalar(db_nonnull, "PRAGMA user_version") catch |e| return status(e);
+    if (app == 0x46534c54 and version == 2) return 0; // Already v2
+
+    const tables = c_api_scalar(
+        db_nonnull,
+        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+    ) catch |e| return status(e);
+    if (tables == 0) {
+        if (engine.c.sqlite3_exec(db, @embedFile("schema.sql"), null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+        if (engine.c.sqlite3_exec(db, "PRAGMA application_id=0x46534c54; PRAGMA user_version=2;", null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+        return 0;
+    }
+
+    const has_nodes = c_api_scalar(
+        db_nonnull,
+        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'"
+    ) catch |e| return status(e);
+    const has_chunks = c_api_scalar(
+        db_nonnull,
+        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'"
+    ) catch |e| return status(e);
+    if (has_nodes == 1 and has_chunks == 1) {
+        if (engine.c.sqlite3_exec(db, "PRAGMA application_id=0x46534c54; PRAGMA user_version=2;", null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
+        return 0;
+    }
+
+    return 9; // InvalidFormat
+}
+
+fn c_api_scalar(db: *engine.c.sqlite3, sql: [:0]const u8) engine.Error!i64 {
+    var stmt: ?*engine.c.sqlite3_stmt = null;
+    try engine.check(engine.c.sqlite3_prepare_v2(db, sql.ptr, -1, &stmt, null));
+    defer _ = engine.c.sqlite3_finalize(stmt);
+    const rc = engine.c.sqlite3_step(stmt);
+    if (rc != engine.c.SQLITE_ROW) try engine.check(rc);
+    return engine.c.sqlite3_column_int64(stmt, 0);
+}

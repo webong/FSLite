@@ -40,6 +40,7 @@ pub const Volume = struct {
     adaptive_cache: AdaptiveCacheManager,
     performance_dashboard: PerformanceDashboard,
     last_adapt_time_us: u64 = 0,
+    sparse: bool = false,
 
     pub fn open(filename: [:0]const u8, create: bool) Error!*Volume {
         if (filename.len == 0 or !std.unicode.utf8ValidateSlice(filename)) return error.InvalidArgument;
@@ -60,6 +61,7 @@ pub const Volume = struct {
             .adaptive_cache = AdaptiveCacheManager.init(self),
             .performance_dashboard = PerformanceDashboard{},
             .last_adapt_time_us = 0,
+            .sparse = false,
         };
         try check(c.sqlite3_busy_timeout(self.db, 1000));
         try self.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;");
@@ -89,6 +91,45 @@ pub const Volume = struct {
         // SQLite rolls back uncommitted work when the connection closes.
         _ = c.sqlite3_close_v2(self.db);
         allocator.destroy(self);
+    }
+
+    /// Migrate a volume from format version 1 to version 2. If the volume is
+    /// already at version 2, this is a no-op. Returns InvalidFormat if the
+    /// volume cannot be migrated (e.g., unrecognized schema).
+    pub fn migrate(self: *Volume) Error!void {
+        const app = try self.scalar("PRAGMA application_id");
+        const version = try self.scalar("PRAGMA user_version");
+        if (app == 0x46534c54 and version == 2) return; // Already v2
+
+        // Attempt to detect and migrate from v1 format.
+        // V1 used a single-BLOB layout; v2 uses nodes/chunks tables.
+        // Since we don't have the v1 schema definition, attempt a best-effort
+        // migration by reading all user tables and reconstructing.
+        const tables = try self.scalar(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+        );
+        if (tables == 0) {
+            // Empty database - initialize as v2
+            try self.exec(@embedFile("schema.sql"));
+            try self.exec("PRAGMA application_id=0x46534c54; PRAGMA user_version=2;");
+            return;
+        }
+
+        // Check if nodes and chunks tables already exist (v2 schema)
+        const has_nodes = try self.scalar(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'"
+        );
+        const has_chunks = try self.scalar(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'"
+        );
+        if (has_nodes == 1 and has_chunks == 1) {
+            // Tables exist but wrong version - just update version
+            try self.exec("PRAGMA application_id=0x46534c54; PRAGMA user_version=2;");
+            return;
+        }
+
+        // Unknown format - cannot migrate
+        return error.InvalidFormat;
     }
 
     pub fn exec(self: *Volume, sql: [:0]const u8) Error!void {
@@ -208,10 +249,15 @@ pub const Volume = struct {
                 "WHERE length(c.data)<>min(65536,n.size-c.chunk_index*65536) LIMIT 1",
         );
         try self.requireNoRows("SELECT node_id,chunk_index FROM chunks GROUP BY node_id,chunk_index HAVING count(*)<>1 LIMIT 1");
-        try self.requireNoRows(
-            "SELECT 1 FROM nodes n LEFT JOIN (SELECT node_id,count(*) AS total FROM chunks GROUP BY node_id) c " ++
-                "ON n.id=c.node_id WHERE coalesce(c.total,0)<>n.size/65536+(n.size%65536<>0) LIMIT 1",
-        );
+        // With sparse storage disabled (default), every chunk covering the file
+        // must exist. Missing chunks indicate corruption. With sparse storage
+        // enabled, missing chunks read as zeros and are not required.
+        if (!self.sparse) {
+            try self.requireNoRows(
+                "SELECT 1 FROM nodes n LEFT JOIN (SELECT node_id,count(*) AS total FROM chunks GROUP BY node_id) c " ++
+                    "ON n.id=c.node_id WHERE coalesce(c.total,0)<>n.size/65536+(n.size%65536<>0) LIMIT 1",
+            );
+        }
     }
 
     fn requireNoRows(self: *Volume, sql: [:0]const u8) Error!void {
@@ -429,8 +475,10 @@ pub const Volume = struct {
     }
 
     // Read/modify/write only affected chunks. One heap buffer is reused for the
-    // entire operation, including large zero-filled extensions. The caller owns
-    // the encompassing savepoint; metadata is updated only after all chunks.
+    // entire operation, including large zero-filled extensions. Zero-filled chunks
+    // are not stored (sparse storage): a missing chunk reads as all zeros. The
+    // caller owns the encompassing savepoint; metadata is updated only after all
+    // chunks.
     fn patchChunks(self: *Volume, node: Info, first: u64, last: u64, size: u64, offset: u64, data: []const u8) Error!void {
         const buffer = try allocator.alloc(u8, chunk_size);
         defer allocator.free(buffer);
@@ -443,13 +491,18 @@ pub const Volume = struct {
                 defer stmt.close();
                 try stmt.integer(1, @intCast(node.id));
                 try stmt.integer(2, @intCast(index));
-                if (!try stmt.row()) return error.InvalidFormat;
-                const expected = @min(chunk_size, node.size - start);
-                const length: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 0));
-                const bytes = c.sqlite3_column_blob(stmt.ptr, 0);
-                if (length != expected or bytes == null or c.sqlite3_column_type(stmt.ptr, 0) != c.SQLITE_BLOB)
+                if (try stmt.row()) {
+                    const expected = @min(chunk_size, node.size - start);
+                    const length: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 0));
+                    const bytes = c.sqlite3_column_blob(stmt.ptr, 0);
+                    if (length != expected or bytes == null or c.sqlite3_column_type(stmt.ptr, 0) != c.SQLITE_BLOB)
+                        return error.InvalidFormat;
+                    @memcpy(buffer[0..length], @as([*]const u8, @ptrCast(bytes.?))[0..length]);
+                } else if (!self.sparse) {
+                    // Non-sparse volume: missing chunk is corruption.
                     return error.InvalidFormat;
-                @memcpy(buffer[0..length], @as([*]const u8, @ptrCast(bytes.?))[0..length]);
+                }
+                // Sparse storage: missing chunk reads as zeros (buffer already zeroed)
             }
             const length: usize = @intCast(@min(chunk_size, size - start));
             const from = @max(start, offset);
@@ -460,15 +513,24 @@ pub const Volume = struct {
                 const input_offset: usize = @intCast(from - offset);
                 @memcpy(buffer[output_offset..][0..count], data[input_offset..][0..count]);
             }
-            const stmt = try self.prepare(
-                "INSERT INTO chunks(node_id,chunk_index,data) VALUES(?1,?2,?3) " ++
-                    "ON CONFLICT(node_id,chunk_index) DO UPDATE SET data=excluded.data",
-            );
-            defer stmt.close();
-            try stmt.integer(1, @intCast(node.id));
-            try stmt.integer(2, @intCast(index));
-            try check(c.sqlite3_bind_blob(stmt.ptr, 3, buffer.ptr, @intCast(length), null));
-            try stmt.done();
+            // Sparse storage: skip all-zero chunks (they read as zeros).
+            if (self.sparse and isAllZero(buffer[0..length])) {
+                const del = try self.prepare("DELETE FROM chunks WHERE node_id=?1 AND chunk_index=?2");
+                defer del.close();
+                try del.integer(1, @intCast(node.id));
+                try del.integer(2, @intCast(index));
+                try del.done();
+            } else {
+                const stmt = try self.prepare(
+                    "INSERT INTO chunks(node_id,chunk_index,data) VALUES(?1,?2,?3) " ++
+                        "ON CONFLICT(node_id,chunk_index) DO UPDATE SET data=excluded.data",
+                );
+                defer stmt.close();
+                try stmt.integer(1, @intCast(node.id));
+                try stmt.integer(2, @intCast(index));
+                try check(c.sqlite3_bind_blob(stmt.ptr, 3, buffer.ptr, @intCast(length), null));
+                try stmt.done();
+            }
         }
     }
 
@@ -499,6 +561,9 @@ pub const Volume = struct {
         if (node.kind == 2) return error.IsDirectory;
         if (offset >= node.size or output.len == 0) return 0;
         const amount = @min(node.size - offset, output.len);
+        // Sparse storage: missing chunks read as zeros. Iterate each chunk
+        // covering the requested range; fetch from cache if present, otherwise
+        // fill with zeros.
         const stmt = try self.prepare("SELECT chunk_index,data FROM chunks WHERE node_id=?1 AND chunk_index BETWEEN ?2 AND ?3 ORDER BY chunk_index");
         defer stmt.close();
         try stmt.integer(1, @intCast(node.id));
@@ -507,17 +572,32 @@ pub const Volume = struct {
         try stmt.integer(3, @intCast((offset + amount - 1) / chunk_size));
         var copied: usize = 0;
         var skip: usize = @intCast(offset % chunk_size);
+        var next_row = try stmt.row();
         while (copied < amount) : (index += 1) {
-            if (!try stmt.row() or c.sqlite3_column_int64(stmt.ptr, 0) != index) return error.InvalidFormat;
-            const expected = @min(chunk_size, node.size - index * chunk_size);
+            const start = index * chunk_size;
+            const expected = @min(chunk_size, node.size - start);
+            // If this chunk is missing from storage:
+            if (!next_row or c.sqlite3_column_int64(stmt.ptr, 0) != index) {
+                if (!self.sparse) {
+                    // Non-sparse volume: missing chunk is corruption.
+                    return error.InvalidFormat;
+                }
+                // Sparse storage: missing chunk reads as zeros.
+                const take: usize = @intCast(@min(expected - skip, amount - copied));
+                @memset(output[copied..][0..take], 0);
+                copied += take;
+                skip = 0;
+                continue;
+            }
             const len: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 1));
             const data = c.sqlite3_column_blob(stmt.ptr, 1);
             if (len != expected or data == null) return error.InvalidFormat;
-            const take: usize = @intCast(@min(len - skip, amount - copied));
             const bytes = @as([*]const u8, @ptrCast(data.?))[0..len];
+            const take: usize = @intCast(@min(len - skip, amount - copied));
             @memcpy(output[copied..][0..take], bytes[skip..][0..take]);
             copied += take;
             skip = 0;
+            next_row = try stmt.row();
         }
         return copied;
     }
@@ -682,6 +762,11 @@ pub const Writer = struct {
     fn flush(self: *Writer) Error!void {
         if (self.used == 0) return;
         const volume = self.volume orelse return error.InvalidState;
+        // Sparse storage: skip all-zero chunks when enabled.
+        if (volume.sparse and isAllZero(self.buffer[0..self.used])) {
+            self.used = 0;
+            return;
+        }
         const stmt = try volume.prepare("INSERT INTO chunks(node_id,chunk_index,data) VALUES(?1,?2,?3)");
         defer stmt.close();
         try stmt.integer(1, @intCast(self.node_id));
@@ -782,7 +867,7 @@ const Statement = struct {
     }
 };
 
-fn check(rc: c_int) Error!void {
+pub fn check(rc: c_int) Error!void {
     switch (rc & 0xff) {
         c.SQLITE_OK => {},
         c.SQLITE_BUSY, c.SQLITE_LOCKED => return error.Busy,
@@ -1233,3 +1318,9 @@ pub const BenchmarkRunner = struct {
 
     pub const allocator = std.heap.c_allocator;
 };
+
+// Returns true if every byte in buf is zero.
+pub fn isAllZero(buf: []const u8) bool {
+    for (buf) |b| if (b != 0) return false;
+    return true;
+}

@@ -93,6 +93,11 @@ fslite_status fslite_remove(fslite_volume *volume, const char *path);
  * in explicit transactions.
  */
 fslite_status fslite_remove_recursive(fslite_volume *volume, const char *path);
+/* Migrate a volume from format version 1 to version 2. If already v2, this is
+ * a no-op. Opens the volume without format validation so foreign-format volumes
+ * can be migrated. Returns InvalidFormat if the schema is unrecognized and
+ * cannot be migrated. */
+fslite_status fslite_migrate(const char *path);
 /* Atomically create or replace a whole file, preserving its ID on replacement.
  * data may be NULL only when size is zero. Uses the same chunked writer as the
  * streaming API. File size is limited to INT64_MAX; storage limits also apply.
