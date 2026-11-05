@@ -303,6 +303,40 @@ pub const Volume = struct {
         try self.deleteNode(node.id);
     }
 
+    pub fn removeRecursive(self: *Volume, path: []const u8) Error!void {
+        try validatePath(path);
+        if (path.len == 1) return error.InvalidArgument;
+        const node = try self.stat(path);
+
+        // Recursively remove all children first (depth-first post-order)
+        if (node.kind == 2) {
+            var children = try self.listChildren(node.id);
+            defer children.deinit(allocator);
+            for (children.items) |child_name| {
+                const child_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{path, child_name}) catch continue;
+                try self.removeRecursive(child_path);
+                allocator.free(child_path);
+            }
+        }
+
+        try self.deleteNode(node.id);
+    }
+
+    fn listChildren(self: *Volume, parent_id: u64) Error!std.ArrayList([]const u8) {
+        const stmt = try self.prepare("SELECT name FROM nodes WHERE parent=?1 ORDER BY name");
+        defer stmt.close();
+        try stmt.integer(1, @intCast(parent_id));
+
+        var children = try std.ArrayList([]const u8).initCapacity(allocator, 16);
+        while (try stmt.row()) {
+            const name_ptr = c.sqlite3_column_text(stmt.ptr, 0) orelse return error.InvalidFormat;
+            const name_len: usize = @intCast(c.sqlite3_column_bytes(stmt.ptr, 0));
+            const name = try allocator.dupe(u8, name_ptr[0..name_len]);
+            try children.append(allocator, name);
+        }
+        return children;
+    }
+
     pub fn rename(self: *Volume, source: []const u8, destination: []const u8) Error!void {
         try validatePath(source);
         try validatePath(destination);

@@ -97,6 +97,16 @@ export fn fslite_remove(volume: ?*Volume, path: ?[*:0]const u8) i32 {
     return 0;
 }
 
+export fn fslite_remove_recursive(volume: ?*Volume, path: ?[*:0]const u8) i32 {
+    const v = volume orelse return 1;
+    const p = path orelse return 1;
+    var op = engine.Operation.start(v) catch |err| return status(err);
+    defer op.deinit();
+    v.removeRecursive(std.mem.span(p)) catch |err| return status(err);
+    op.finish() catch |err| return status(err);
+    return 0;
+}
+
 export fn fslite_write(volume: ?*Volume, path: ?[*:0]const u8, data: ?[*]const u8, size: usize) i32 {
     const v = volume orelse return 1;
     const p = path orelse return 1;

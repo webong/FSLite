@@ -86,6 +86,13 @@ fslite_status fslite_rename(fslite_volume *volume, const char *source, const cha
  * and return INVALID_STATE while a streaming writer reserves this volume handle.
  */
 fslite_status fslite_remove(fslite_volume *volume, const char *path);
+/* Recursively delete a directory tree: removes all descendants first
+ * (depth-first post-order), then the directory itself, then the file's chunks.
+ * A file path removes just that file. Missing paths return NOT_FOUND; root
+ * returns INVALID_ARGUMENT. All operations use savepoints and participate
+ * in explicit transactions.
+ */
+fslite_status fslite_remove_recursive(fslite_volume *volume, const char *path);
 /* Atomically create or replace a whole file, preserving its ID on replacement.
  * data may be NULL only when size is zero. Uses the same chunked writer as the
  * streaming API. File size is limited to INT64_MAX; storage limits also apply.
