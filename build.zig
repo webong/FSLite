@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
         module.addCSourceFile(.{ .file = b.path("tests/integrity.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/transactions.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.addCSourceFile(.{ .file = b.path("tests/fault_injection.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.addCSourceFile(.{ .file = b.path("tests/statement_reuse.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
         module.linkLibrary(lib);
         // Only the static test calls SQLite directly to construct foreign-format fixtures.
         if (comptime std.mem.eql(u8, name, "static")) module.addCMacro("FSLITE_TEST_SQLITE", "1");

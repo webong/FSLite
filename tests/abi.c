@@ -468,6 +468,7 @@ void test_backup(void);
 void test_random_access(void);
 void test_integrity(void);
 void test_transactions(void);
+void test_statement_reuse(void);
 
 int main(void) {
     test_integrity();
@@ -478,6 +479,7 @@ int main(void) {
     test_engine();
     test_invalid_arguments();
     test_streaming();
+    test_statement_reuse();
 #ifdef FSLITE_TEST_SQLITE
     test_foreign_databases();
     test_stream_failures_and_format();
