@@ -39,6 +39,7 @@ pub const Volume = struct {
     cache_stats: CacheStats,
     adaptive_cache: AdaptiveCacheManager,
     performance_dashboard: PerformanceDashboard,
+    prepared_statements: std.ArrayList(*c.sqlite3_stmt),
     last_adapt_time_us: u64 = 0,
     sparse: bool = false,
 
@@ -60,6 +61,7 @@ pub const Volume = struct {
             .cache_stats = CacheStats{},
             .adaptive_cache = AdaptiveCacheManager.init(self),
             .performance_dashboard = PerformanceDashboard{},
+            .prepared_statements = try std.ArrayList(*c.sqlite3_stmt).initCapacity(allocator, 16),
             .last_adapt_time_us = 0,
             .sparse = false,
         };
@@ -88,6 +90,11 @@ pub const Volume = struct {
     pub fn close(self: *Volume) void {
         if (self.backup) |backup| backup.abort();
         if (self.writer) |writer| writer.abort();
+        // Finalize all cached prepared statements before closing the connection.
+        for (self.prepared_statements.items) |stmt| {
+            _ = c.sqlite3_finalize(stmt);
+        }
+        self.prepared_statements.deinit(allocator);
         // SQLite rolls back uncommitted work when the connection closes.
         _ = c.sqlite3_close_v2(self.db);
         allocator.destroy(self);
@@ -139,6 +146,35 @@ pub const Volume = struct {
     fn prepare(self: *Volume, sql: [:0]const u8) Error!Statement {
         var stmt: ?*c.sqlite3_stmt = null;
         try check(c.sqlite3_prepare_v2(self.db, sql.ptr, -1, &stmt, null));
+        return .{ .ptr = stmt.? };
+    }
+
+    /// Prepare a SQL statement and cache it for reuse. If the same SQL has been
+    /// prepared before, the cached statement is returned with its bindings
+    /// already cleared. The statement remains owned by the Volume and is
+    /// finalized in close(). Callers must not close() statements from prepareCached.
+    fn prepareCached(self: *Volume, sql: [:0]const u8) Error!Statement {
+        // Check cache for exact SQL match.
+        for (self.prepared_statements.items) |stmt_ptr| {
+            const cached_sql = c.sqlite3_sql(stmt_ptr);
+            if (cached_sql != null) {
+                // cached_sql is a null-terminated C string; find its length.
+                var c_len: usize = 0;
+                while (cached_sql[c_len] != 0) : (c_len += 1) {}
+                if (c_len == sql.len and std.mem.eql(u8, sql, cached_sql[0..c_len])) {
+                    // Reset and clear bindings before returning for reuse.
+                    try check(c.sqlite3_reset(stmt_ptr));
+                    try check(c.sqlite3_clear_bindings(stmt_ptr));
+                    return .{ .ptr = stmt_ptr };
+                }
+            }
+        }
+        // Not cached: prepare and store.
+        var stmt: ?*c.sqlite3_stmt = null;
+        try check(c.sqlite3_prepare_v2(self.db, sql.ptr, -1, &stmt, null));
+        if (stmt) |s| {
+            try self.prepared_statements.append(allocator, s);
+        }
         return .{ .ptr = stmt.? };
     }
 
@@ -283,15 +319,22 @@ pub const Volume = struct {
     pub fn rollback(self: *Volume) Error!void {
         if (self.writer != null or self.backup != null or !self.inTransaction()) return error.InvalidState;
         try self.exec("ROLLBACK");
+        // Reset and clear bindings on all cached statements so they are safe
+        // for reuse after a rollback. Any partial execution state is discarded.
+        for (self.prepared_statements.items) |stmt| {
+            _ = c.sqlite3_reset(stmt);
+            _ = c.sqlite3_clear_bindings(stmt);
+        }
     }
 
     fn child(self: *Volume, parent: u64, name: []const u8) Error!?Info {
-        const stmt = try self.prepare("SELECT id,kind,size FROM nodes WHERE parent=?1 AND name=?2");
-        defer stmt.close();
+        const stmt = try self.prepareCached("SELECT id,kind,size FROM nodes WHERE parent=?1 AND name=?2");
         try stmt.integer(1, @intCast(parent));
         try stmt.text(2, name);
         if (!try stmt.row()) return null;
-        return try stmt.info(0);
+        const info = try stmt.info(0);
+        try stmt.reset();
+        return info;
     }
 
     pub fn stat(self: *Volume, path: []const u8) Error!Info {
@@ -467,8 +510,7 @@ pub const Volume = struct {
     }
 
     fn setSize(self: *Volume, id: u64, size: u64) Error!void {
-        const stmt = try self.prepare("UPDATE nodes SET size=?2 WHERE id=?1");
-        defer stmt.close();
+        const stmt = try self.prepareCached("UPDATE nodes SET size=?2 WHERE id=?1");
         try stmt.integer(1, @intCast(id));
         try stmt.integer(2, @intCast(size));
         try stmt.done();
@@ -540,17 +582,15 @@ pub const Volume = struct {
         if (try self.child(parent.id, parent.name)) |existing| {
             if (existing.kind == 2) return error.IsDirectory;
         }
-        const stmt = try self.prepare(
+        const stmt = try self.prepareCached(
             "INSERT INTO nodes(parent,name,kind,size) VALUES(?1,?2,1,0) " ++
                 "ON CONFLICT(parent,name) DO UPDATE SET size=0",
         );
-        defer stmt.close();
         try stmt.integer(1, @intCast(parent.id));
         try stmt.text(2, parent.name);
         try stmt.done();
         const node = try self.child(parent.id, parent.name) orelse return error.Internal;
-        const delete_chunks = try self.prepare("DELETE FROM chunks WHERE node_id=?1");
-        defer delete_chunks.close();
+        const delete_chunks = try self.prepareCached("DELETE FROM chunks WHERE node_id=?1");
         try delete_chunks.integer(1, @intCast(node.id));
         try delete_chunks.done();
         return node.id;
@@ -564,8 +604,7 @@ pub const Volume = struct {
         // Sparse storage: missing chunks read as zeros. Iterate each chunk
         // covering the requested range; fetch from cache if present, otherwise
         // fill with zeros.
-        const stmt = try self.prepare("SELECT chunk_index,data FROM chunks WHERE node_id=?1 AND chunk_index BETWEEN ?2 AND ?3 ORDER BY chunk_index");
-        defer stmt.close();
+        const stmt = try self.prepareCached("SELECT chunk_index,data FROM chunks WHERE node_id=?1 AND chunk_index BETWEEN ?2 AND ?3 ORDER BY chunk_index");
         try stmt.integer(1, @intCast(node.id));
         var index = offset / chunk_size;
         try stmt.integer(2, @intCast(index));
@@ -599,6 +638,7 @@ pub const Volume = struct {
             skip = 0;
             next_row = try stmt.row();
         }
+        try stmt.reset();
         return copied;
     }
 
@@ -841,6 +881,16 @@ const Statement = struct {
     ptr: *c.sqlite3_stmt,
     fn close(self: Statement) void {
         _ = c.sqlite3_finalize(self.ptr);
+    }
+    /// Reset the statement after execution, clearing the result set but keeping
+    /// the prepared statement and its bindings. Safe to call before reuse.
+    fn reset(self: Statement) Error!void {
+        try check(c.sqlite3_reset(self.ptr));
+    }
+    /// Clear all bindings on the statement. Must be called before rebinding
+    /// parameters for reuse, so that no borrowed buffers are retained.
+    fn clearBindings(self: Statement) Error!void {
+        try check(c.sqlite3_clear_bindings(self.ptr));
     }
     fn text(self: Statement, index: c_int, value: []const u8) Error!void {
         try check(c.sqlite3_bind_text(self.ptr, index, value.ptr, @intCast(value.len), null));
