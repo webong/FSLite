@@ -316,6 +316,207 @@ static void test_busy_contention(void) {
     printf("test_busy_contention: PASSED\n");
 }
 
+/* Non-empty directory removal with fslite_remove must return NOT_EMPTY. */
+static void test_remove_non_empty_dir_fails(void) {
+    fslite_volume *v = NULL;
+    char path[64];
+    new_path(path);
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    OK(fslite_mkdir(v, "/dir"));
+    OK(fslite_write(v, "/dir/file.txt", "data", 4));
+
+    CHECK(fslite_remove(v, "/dir") == FSLITE_NOT_EMPTY);
+
+    // Directory must still exist with its file intact
+    fslite_info info;
+    OK(fslite_stat(v, "/dir", &info));
+    CHECK(info.kind == FSLITE_DIRECTORY);
+    OK(fslite_stat(v, "/dir/file.txt", &info));
+    CHECK(info.kind == FSLITE_FILE);
+
+    // Clean up with recursive remove
+    OK(fslite_remove_recursive(v, "/dir"));
+    CHECK(fslite_stat(v, "/dir", &info) == FSLITE_NOT_FOUND);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_remove_non_empty_dir_fails: PASSED\n");
+}
+
+/* Recursive remove of a missing path returns NOT_FOUND. */
+static void test_remove_recursive_nonexistent(void) {
+    fslite_volume *v = NULL;
+    char path[64];
+    new_path(path);
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    CHECK(fslite_remove_recursive(v, "/nonexistent") == FSLITE_NOT_FOUND);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_remove_recursive_nonexistent: PASSED\n");
+}
+
+/* Remove while a writer holds the volume returns INVALID_STATE. */
+static void test_remove_with_active_writer(void) {
+    fslite_volume *v = NULL;
+    char path[64];
+    new_path(path);
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    OK(fslite_mkdir(v, "/dir"));
+    OK(fslite_write(v, "/dir/file.txt", "data", 4));
+
+    fslite_writer *w = NULL;
+    OK(fslite_writer_open(v, "/stream.txt", &w));
+
+    // Remove while writer is active - INVALID_STATE
+    CHECK(fslite_remove(v, "/dir") == FSLITE_INVALID_STATE);
+    CHECK(fslite_remove_recursive(v, "/dir") == FSLITE_INVALID_STATE);
+
+    fslite_writer_close(w);
+
+    // After writer closes, remove works again
+    OK(fslite_remove_recursive(v, "/dir"));
+    fslite_info info;
+    CHECK(fslite_stat(v, "/dir", &info) == FSLITE_NOT_FOUND);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_remove_with_active_writer: PASSED\n");
+}
+
+/* Concurrent remove vs write: two separate handles serialize via SQLite locking. */
+static void test_concurrent_remove_vs_write(void) {
+    char path[64];
+    new_path(path);
+    fslite_volume *v1 = NULL, *v2 = NULL;
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v1));
+    OK(fslite_open(path, 0, &v2));
+
+    OK(fslite_mkdir(v1, "/dir"));
+    OK(fslite_write(v1, "/dir/file.txt", "data", 4));
+    OK(fslite_commit(v1));
+
+    // v1 begins a transaction and removes /dir
+    OK(fslite_begin(v1));
+    OK(fslite_remove_recursive(v1, "/dir"));
+
+    // v2 tries to write to the removed path - should get BUSY (locked by v1)
+    CHECK(fslite_write(v2, "/dir/newfile.txt", "data", 4) == FSLITE_BUSY);
+    CHECK(!fslite_in_transaction(v2));
+
+    // v1 commits the removal
+    OK(fslite_commit(v1));
+
+    // v2 can now create /dir fresh
+    OK(fslite_mkdir(v2, "/dir"));
+    OK(fslite_write(v2, "/dir/newfile.txt", "data", 4));
+    OK(fslite_commit(v2));
+
+    fslite_close(v1);
+    fslite_close(v2);
+    CHECK(unlink(path) == 0);
+    printf("test_concurrent_remove_vs_write: PASSED\n");
+}
+
+/* Remove during a backup: backup holds a read lock, remove should wait or fail. */
+static void test_remove_during_backup(void) {
+    char path[64];
+    new_path(path);
+    char dest[64];
+    strcpy(dest, "/tmp/fslite-backup-XXXXXX");
+    int fd = mkstemp(dest);
+    CHECK(fd >= 0 && close(fd) == 0);
+    unlink(dest);
+
+    fslite_volume *v = NULL;
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    OK(fslite_mkdir(v, "/dir"));
+    OK(fslite_write(v, "/dir/file.txt", "data", 4));
+    OK(fslite_commit(v));
+
+    fslite_backup *b = NULL;
+    OK(fslite_backup_open(v, dest, &b));
+
+    // Remove while backup is open - SQLite serializes, may return BUSY or wait
+    fslite_status rc = fslite_remove_recursive(v, "/dir");
+    CHECK(rc == FSLITE_OK || rc == FSLITE_BUSY);
+
+    fslite_backup_close(b);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    CHECK(unlink(dest) == 0);
+    printf("test_remove_during_backup: PASSED\n");
+}
+
+/* Remove inside a savepoint, then rollback the savepoint. */
+static void test_remove_savepoint_rollback(void) {
+    fslite_volume *v = NULL;
+    char path[64];
+    new_path(path);
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    OK(fslite_mkdir(v, "/dir"));
+    OK(fslite_write(v, "/dir/file.txt", "data", 4));
+    OK(fslite_commit(v));
+
+    OK(fslite_begin(v));
+    OK(fslite_remove_recursive(v, "/dir"));
+
+    fslite_info info;
+    CHECK(fslite_stat(v, "/dir", &info) == FSLITE_NOT_FOUND);
+
+    // Rollback restores /dir
+    OK(fslite_rollback(v));
+    OK(fslite_stat(v, "/dir", &info));
+    CHECK(info.kind == FSLITE_DIRECTORY);
+    OK(fslite_stat(v, "/dir/file.txt", &info));
+    CHECK(info.kind == FSLITE_FILE);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_remove_savepoint_rollback: PASSED\n");
+}
+
+/* Deeply nested tree with many files at multiple levels. */
+static void test_recursive_remove_deep_tree(void) {
+    fslite_volume *v = NULL;
+    char path[64];
+    new_path(path);
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+
+    // Build a deep tree: /a/b/c/d/e/f/g
+    const char *levels[] = {"a", "a/b", "a/b/c", "a/b/c/d",
+                            "a/b/c/d/e", "a/b/c/d/e/f", "a/b/c/d/e/f/g"};
+    for (size_t i = 0; i < sizeof levels / sizeof *levels; i++) {
+        char p[128];
+        snprintf(p, sizeof p, "/%s", levels[i]);
+        OK(fslite_mkdir(v, p));
+    }
+
+    // Files at each level
+    OK(fslite_write(v, "/a/root.txt", "root", 4));
+    OK(fslite_write(v, "/a/b/level1.txt", "level1", 6));
+    OK(fslite_write(v, "/a/b/c/level2.txt", "level2", 6));
+    OK(fslite_write(v, "/a/b/c/d/level3.txt", "level3", 6));
+    OK(fslite_write(v, "/a/b/c/d/e/f/g/deep.txt", "deep", 4));
+
+    OK(fslite_remove_recursive(v, "/a"));
+
+    fslite_info info;
+    CHECK(fslite_stat(v, "/a", &info) == FSLITE_NOT_FOUND);
+    CHECK(fslite_stat(v, "/a/b", &info) == FSLITE_NOT_FOUND);
+    CHECK(fslite_stat(v, "/a/b/c/d/e/f/g/deep.txt", &info) == FSLITE_NOT_FOUND);
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_recursive_remove_deep_tree: PASSED\n");
+}
+
 void test_fault_injection(void) {
     test_invalid_arguments();
     test_recursive_remove_file();
@@ -327,5 +528,12 @@ void test_fault_injection(void) {
     test_concurrent_separate_handles();
     test_process_exit_mid_transaction();
     test_busy_contention();
+    test_remove_non_empty_dir_fails();
+    test_remove_recursive_nonexistent();
+    test_remove_with_active_writer();
+    test_concurrent_remove_vs_write();
+    test_remove_during_backup();
+    test_remove_savepoint_rollback();
+    test_recursive_remove_deep_tree();
     printf("All fault injection tests PASSED\n");
 }
