@@ -43,7 +43,7 @@ pub const Volume = struct {
     last_adapt_time_us: u64 = 0,
     sparse: bool = false,
 
-    pub fn open(filename: [:0]const u8, create: bool) Error!*Volume {
+    pub fn open(filename: [:0]const u8, create: bool, sparse: bool) Error!*Volume {
         if (filename.len == 0 or !std.unicode.utf8ValidateSlice(filename)) return error.InvalidArgument;
         var db: ?*c.sqlite3 = null;
         const flags: c_int = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_FULLMUTEX |
@@ -63,7 +63,7 @@ pub const Volume = struct {
             .performance_dashboard = PerformanceDashboard{},
             .prepared_statements = try std.ArrayList(*c.sqlite3_stmt).initCapacity(allocator, 16),
             .last_adapt_time_us = 0,
-            .sparse = false,
+            .sparse = sparse,
         };
         try check(c.sqlite3_busy_timeout(self.db, 1000));
         try self.exec("PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF;");

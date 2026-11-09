@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <sys/wait.h>
 #include <errno.h>
@@ -517,6 +518,47 @@ static void test_recursive_remove_deep_tree(void) {
     printf("test_recursive_remove_deep_tree: PASSED\n");
 }
 
+/* Sparse storage: writing sparse data skips all-zero chunks; hole reads as zeros. */
+static void test_sparse_storage(void) {
+    char path[64];
+    new_path(path);
+    fslite_volume *v = NULL;
+    OK(fslite_open(path, FSLITE_OPEN_CREATE | FSLITE_OPEN_SPARSE, &v));
+
+    const uint64_t chunk = 65536;
+    char data_a[8] = "AAAAAAAA";
+    char data_b[8] = "BBBBBBBB";
+
+    // Write at offset 0 and at offset 2*chunk (hole at chunk 1)
+    OK(fslite_write_at(v, "/sparse.dat", 0, data_a, 8));
+    OK(fslite_write_at(v, "/sparse.dat", 2 * chunk, data_b, 8));
+
+    // Read back - hole should read as zeros
+    char buf[2 * chunk + 8];
+    memset(buf, 0xFF, sizeof buf);
+    size_t count;
+    OK(fslite_read(v, "/sparse.dat", 0, buf, sizeof buf, &count));
+    CHECK(count == 2 * chunk + 8);
+    CHECK(memcmp(buf, data_a, 8) == 0);
+    for (uint64_t i = 8; i < 2 * chunk; i++) {
+        CHECK(buf[i] == 0);
+    }
+    CHECK(memcmp(buf + 2 * chunk, data_b, 8) == 0);
+
+    // Read just the hole
+    char hole[chunk];
+    memset(hole, 0xFF, sizeof hole);
+    OK(fslite_read(v, "/sparse.dat", 8, hole, sizeof hole, &count));
+    CHECK(count == chunk);
+    for (uint64_t i = 0; i < chunk; i++) {
+        CHECK(hole[i] == 0);
+    }
+
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_sparse_storage: PASSED\n");
+}
+
 void test_fault_injection(void) {
     test_invalid_arguments();
     test_recursive_remove_file();
@@ -535,5 +577,6 @@ void test_fault_injection(void) {
     test_remove_during_backup();
     test_remove_savepoint_rollback();
     test_recursive_remove_deep_tree();
+    test_sparse_storage();
     printf("All fault injection tests PASSED\n");
 }

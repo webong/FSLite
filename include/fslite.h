@@ -33,6 +33,7 @@ typedef int32_t fslite_status;
 #define FSLITE_DURABILITY_UNCERTAIN 16
 
 #define FSLITE_OPEN_CREATE UINT32_C(1)
+#define FSLITE_OPEN_SPARSE UINT32_C(2) /* Skip storing all-zero chunks */
 #define FSLITE_FILE        UINT32_C(1)
 #define FSLITE_DIRECTORY   UINT32_C(2)
 

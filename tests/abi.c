@@ -160,7 +160,7 @@ static void test_invalid_arguments(void) {
     fslite_volume *v = (fslite_volume *)(uintptr_t)1;
     STATUS(fslite_open(NULL, 0, &v), FSLITE_INVALID_ARGUMENT);
     CHECK(v == NULL);
-    STATUS(fslite_open("unused", 2, &v), FSLITE_INVALID_ARGUMENT);
+    STATUS(fslite_open("unused", 4, &v), FSLITE_INVALID_ARGUMENT);
     CHECK(v == NULL);
     STATUS(fslite_open("unused", 0, NULL), FSLITE_INVALID_ARGUMENT);
     STATUS(fslite_begin(NULL), FSLITE_INVALID_ARGUMENT);

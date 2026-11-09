@@ -56,9 +56,12 @@ export fn fslite_status_string(code: i32) [*:0]const u8 {
 export fn fslite_open(filename: ?[*:0]const u8, flags: u32, output: ?*?*Volume) i32 {
     const out = output orelse return 1;
     out.* = null;
-    if ((flags & ~@as(u32, 1)) != 0) return 1;
+    const allowed = @as(u32, 1) | @as(u32, 2);
+    if ((flags & ~allowed) != 0) return 1;
     const name = filename orelse return 1;
-    out.* = Volume.open(std.mem.span(name), flags == 1) catch |err| return status(err);
+    const create = flags & 1 == 1;
+    const sparse = flags & 2 == 2;
+    out.* = Volume.open(std.mem.span(name), create, sparse) catch |err| return status(err);
     return 0;
 }
 
