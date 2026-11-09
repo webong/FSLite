@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # Benchmark regression check
 # Compares current benchmark results against baseline stored in ci/benchmarks-baseline.txt
 # Exits non-zero if performance regresses beyond tolerance
+#
+# Baseline format (key-value):
+#   # Hardware: ...
+#   # Zig: ...
+#   name median min max variability
+#
+# Current benchmark output format:
+#   Name benchmark (iter=N[, extra=N]): X.XXX seconds, Y.YYY ops/sec
 
 BENCHMARK_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BASELINE_FILE="${BENCHMARK_DIR}/ci/benchmarks-baseline.txt"
@@ -19,8 +27,8 @@ fi
 if [[ ! -f "${BASELINE_FILE}" ]]; then
     echo "Creating baseline at ${BASELINE_FILE}"
     mkdir -p "$(dirname "${BASELINE_FILE}")"
-    "${BENCHMARK_DIR}/zig-out/bin/full_performance-bench-static" > "${BASELINE_FILE}"
-    echo "Baseline created. Review and commit it."
+    "${BENCHMARK_DIR}/zig-out/bin/full_performance-bench-static" > "${BASELINE_FILE}.raw"
+    echo "Baseline raw output created at ${BASELINE_FILE}.raw. Review and convert to key-value format."
     exit 0
 fi
 
@@ -32,34 +40,57 @@ echo "Current benchmark results:"
 echo "${CURRENT_OUTPUT}"
 echo ""
 
-# Parse and compare
-REGRESSION=0
+# Parse current results into temp file for lookup
+CURRENT_FILE=$(mktemp)
+trap 'rm -f "${CURRENT_FILE}"' EXIT
+
+# Use process substitution to avoid subshell issue
 while IFS= read -r line; do
     # Parse lines like: "Path lookup benchmark (iter=30): 0.001 seconds, 42373 ops/sec"
-    if [[ "${line}" =~ ^(.+)\ benchmark\ \(iter=[0-9]+\):\ [0-9.]+\ seconds,\ ([0-9.]+)\ ops/sec ]]; then
-        name="${BASH_REMATCH[1]}"
-        current_ops="${BASH_REMATCH[2]}"
+    # or: "Random access reads benchmark (iter=30, file_size=64KB): 0.001 seconds, 30457 ops/sec"
+    if echo "${line}" | grep -qE 'benchmark \(iter=[0-9][^)]*\): [0-9.]+ seconds, [0-9.]+ ops/sec'; then
+        name=$(echo "${line}" | sed -E 's/^(.+) benchmark \(iter=[0-9][^)]*\):.*/\1/')
+        ops=$(echo "${line}" | sed -E 's/.*seconds, ([0-9.]+) ops\/sec.*/\1/')
+        # Normalize name: lowercase, replace spaces with underscores
+        key=$(echo "${name}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+        echo "${key} ${ops}" >> "${CURRENT_FILE}"
+    fi
+done < <(echo "${CURRENT_OUTPUT}")
 
-        # Find baseline value by parsing the baseline file
-        baseline_ops=$(grep "${name}" "${BASELINE_FILE}" | grep -oP '\d+\.?\d*\ ops/sec' | head -1 | grep -oP '^\d+\.?\d*' || echo "0")
+# Parse and compare against baseline
+REGRESSION=0
+while IFS= read -r line; do
+    # Skip comments and empty lines
+    [[ "${line}" =~ ^# ]] && continue
+    [[ -z "${line}" ]] && continue
 
-        if [[ "${baseline_ops}" == "0" ]]; then
-            echo "WARNING: No baseline for '${name}', skipping"
-            continue
-        fi
+    # Parse: name median min max variability
+    read -r name median min max var <<< "${line}"
+    [[ -z "${name}" ]] && continue
 
-        # Calculate change percentage
-        change=$(python3 -c "
+    # Normalize baseline name to match current key format
+    bkey=$(echo "${name}" | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+
+    # Look up current value for this key
+    current_ops=$(grep "^${bkey} " "${CURRENT_FILE}" 2>/dev/null | head -1 | awk '{print $2}' || true)
+
+    if [[ -z "${current_ops}" ]]; then
+        echo "WARNING: No current measurement for '${name}', skipping"
+        continue
+    fi
+
+    # Calculate change percentage
+    change=$(python3 -c "
 current = ${current_ops}
-baseline = ${baseline_ops}
+baseline = ${median}
 if baseline > 0:
     print(f'{(current - baseline) / baseline * 100:.1f}')
 else:
     print('0')
 " 2>/dev/null || echo "0")
 
-        # Check for regression (performance decrease beyond tolerance)
-        regression_check=$(python3 -c "
+    # Check for regression
+    regression_check=$(python3 -c "
 change = ${change}
 tolerance = ${TOLERANCE}
 if change < -tolerance * 100:
@@ -68,14 +99,13 @@ else:
     print('OK')
 " 2>/dev/null || echo "OK")
 
-        if [[ "${regression_check}" == "REGRESSION" ]]; then
-            echo "REGRESSION DETECTED: ${name} - ${change}% change (baseline: ${baseline_ops} ops/sec, current: ${current_ops} ops/sec)"
-            REGRESSION=1
-        else
-            echo "OK: ${name} - ${change}% change"
-        fi
+    if [[ "${regression_check}" == "REGRESSION" ]]; then
+        echo "REGRESSION DETECTED: ${name} - ${change}% change (baseline: ${median} ops/sec, current: ${current_ops} ops/sec)"
+        REGRESSION=1
+    else
+        echo "OK: ${name} - ${change}% change (baseline: ${median}, current: ${current_ops})"
     fi
-done <<< "${CURRENT_OUTPUT}"
+done < "${BASELINE_FILE}"
 
 if [[ ${REGRESSION} -eq 1 ]]; then
     echo ""

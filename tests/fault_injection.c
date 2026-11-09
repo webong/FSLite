@@ -8,6 +8,10 @@
 #include <sys/wait.h>
 #include <errno.h>
 
+#ifdef FSLITE_TEST_SQLITE
+#include <sqlite3.h>
+#endif
+
 #define CHECK(condition) do { if (!(condition)) { \
     fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #condition); exit(1); \
 } } while (0)
@@ -559,6 +563,71 @@ static void test_sparse_storage(void) {
     printf("test_sparse_storage: PASSED\n");
 }
 
+#ifdef FSLITE_TEST_SQLITE
+/* Format migration: migrating an empty database initializes it as v2. */
+static void test_migrate_empty_database(void) {
+    char path[64];
+    new_path(path);
+    // Create an empty SQLite database (no tables)
+    sqlite3 *db = NULL;
+    CHECK(sqlite3_open(path, &db) == SQLITE_OK);
+    CHECK(sqlite3_close(db) == SQLITE_OK);
+
+    // Migrate should initialize as v2
+    CHECK(fslite_migrate(path) == FSLITE_OK);
+
+    // Verify the volume is valid v2
+    fslite_volume *v = NULL;
+    OK(fslite_open(path, 0, &v));
+    fslite_info info;
+    OK(fslite_stat(v, "/", &info));
+    CHECK(info.kind == FSLITE_DIRECTORY);
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_migrate_empty_database: PASSED\n");
+}
+
+/* Format migration: migrating an already-v2 database is a no-op. */
+static void test_migrate_existing_v2(void) {
+    char path[64];
+    new_path(path);
+    fslite_volume *v = NULL;
+    OK(fslite_open(path, FSLITE_OPEN_CREATE, &v));
+    OK(fslite_mkdir(v, "/dir"));
+    OK(fslite_write(v, "/dir/file.txt", "data", 4));
+    fslite_close(v);
+
+    // Migrate should succeed (already v2)
+    CHECK(fslite_migrate(path) == FSLITE_OK);
+
+    // Verify data is intact
+    OK(fslite_open(path, 0, &v));
+    fslite_info info;
+    OK(fslite_stat(v, "/dir/file.txt", &info));
+    CHECK(info.kind == FSLITE_FILE);
+    fslite_close(v);
+    CHECK(unlink(path) == 0);
+    printf("test_migrate_existing_v2: PASSED\n");
+}
+
+/* Format migration: migrating a foreign-format database fails. */
+static void test_migrate_foreign_format(void) {
+    char path[64];
+    new_path(path);
+    // Create a database with wrong application_id
+    sqlite3 *db = NULL;
+    CHECK(sqlite3_open(path, &db) == SQLITE_OK);
+    CHECK(sqlite3_exec(db, "PRAGMA application_id=0x12345678; PRAGMA user_version=1;", NULL, NULL, NULL) == SQLITE_OK);
+    CHECK(sqlite3_close(db) == SQLITE_OK);
+
+    // Migrate should fail with InvalidFormat
+    CHECK(fslite_migrate(path) == FSLITE_INVALID_FORMAT);
+
+    CHECK(unlink(path) == 0);
+    printf("test_migrate_foreign_format: PASSED\n");
+}
+#endif
+
 void test_fault_injection(void) {
     test_invalid_arguments();
     test_recursive_remove_file();
@@ -578,5 +647,10 @@ void test_fault_injection(void) {
     test_remove_savepoint_rollback();
     test_recursive_remove_deep_tree();
     test_sparse_storage();
+#ifdef FSLITE_TEST_SQLITE
+    test_migrate_empty_database();
+    test_migrate_existing_v2();
+    test_migrate_foreign_format();
+#endif
     printf("All fault injection tests PASSED\n");
 }

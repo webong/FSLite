@@ -1,8 +1,11 @@
-=== FSLite Full Performance Benchmark Suite ===
-Running 30 iterations per benchmark
+# FSLite Benchmark Baseline
+# Hardware: Apple M3 Pro, 18GB RAM, macOS 23.6.0
+# Zig: 0.15.2
+# Build: ReleaseSafe
+# Date: 2026-11-09
 
-Path lookup benchmark (iter=30): 0.000 seconds, 107914 ops/sec
-Small file operations benchmark (iter=30): 0.016 seconds, 1892 ops/sec
-Streaming writes benchmark (iter=30, size=5MB): 0.664 seconds, 226.0 MB/sec
-Random access reads benchmark (iter=30, file_size=64KB): 0.001 seconds, 27804 ops/sec
-=== All benchmarks completed ===
+# Format: name median min max variability
+path_lookup 176471 176471 176471 0.0
+small_file_operations 2556 2556 2556 0.0
+streaming_writes 276.8 276.8 276.8 0.0
+random_access_reads 31315 31315 31315 0.0
