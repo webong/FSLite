@@ -381,6 +381,33 @@ commit, rollback, close-without-commit, and visibility from a second connection.
 Failures print the seed, batch, and step. Static tests additionally inject chunk
 statement failures to verify preservation of earlier transaction work.
 
+## Metadata, limits, and diagnostics
+
+`fslite_inspect(volume, path, &info)` extends `fslite_stat` with the stored chunk
+count, allocated bytes, node kind, and path depth. Directories report zero
+chunks and allocated bytes. Sparse holes reduce the storage counters without
+changing the logical size:
+
+```c
+fslite_file_info info;
+if (fslite_inspect(volume, "/data.bin", &info) == FSLITE_OK) {
+    /* info.size is logical; info.chunks and info.allocated describe storage. */
+}
+```
+
+`fslite_set_limits(volume, &limits)` configures per-handle limits for path bytes,
+name bytes, file size, and total logical volume size. A zero field keeps its
+default, and `NULL` restores all defaults. Limits may only change while the
+handle is quiescent: no active writer or backup, and not inside a transaction.
+Lowering a limit never deletes data or blocks in-place edits and shrinking; only
+growth beyond a limit fails with `FSLITE_TOO_LARGE`.
+
+`fslite_get_volume_stats(volume, &stats)` reports file/directory and chunk
+counts, logical and stored bytes, database page and freelist accounting, and
+transaction/sparse flags for the handle's current view. Inspection and statistics
+read one consistent snapshot, including the caller's pending transaction work.
+See [include/fslite.h](include/fslite.h) for exact field semantics.
+
 ## Host contract
 
 The authoritative ABI is [include/fslite.h](include/fslite.h).
