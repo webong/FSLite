@@ -1,9 +1,10 @@
 # FSLite Benchmark Baseline
 #
-# Hardware description: Apple M3 Pro, 18GB RAM, macOS 23.6.0
+# Local section: Apple M3 Pro, 18GB RAM, macOS 23.6.0
 # Zig: 0.15.2
 # Build: ReleaseSafe
 # Date: 2026-11-10
+# GitHub sections were recorded by the Benchmark baseline workflow.
 #
 # Each section starts with `# Hardware: <normalized-key>` and contains
 # `name median min max variability` lines. The min column is the slowest of

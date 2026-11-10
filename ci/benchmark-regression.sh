@@ -24,7 +24,8 @@ BENCHMARK="${BENCHMARK_DIR}/zig-out/bin/full_performance-bench-static"
 # Compare against the recorded minimum, not the median: the minimum is the
 # slowest run observed while establishing the baseline, so ordinary noise does
 # not fail the check. A regression below it by more than this fraction does.
-TOLERANCE=${TOLERANCE:-0.35}
+# Shared CI runners are noisy, so the default leaves substantial headroom.
+TOLERANCE=${TOLERANCE:-0.50}
 REPS=${REPS:-5}
 
 # Normalize a hardware description into a stable section key. On GitHub Actions

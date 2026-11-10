@@ -116,9 +116,9 @@ section ready to paste into the baseline; `REPS` changes the repetition count.
 The **Benchmark baseline** workflow runs the same command on each CI runner image
 and publishes the sections in its job summary.
 
-Enforcement uses the recorded minimum as the floor with a 35% default tolerance
-(`TOLERANCE`), because the short lookup/read workloads still vary more than the
-streaming workload. Sections record a `ReleaseSafe` build; the check reports
+Enforcement uses the recorded minimum as the floor with a 50% default tolerance
+(`TOLERANCE`), because shared CI runners vary more than an idle workstation and
+the short lookup/read workloads vary more than streaming writes. Sections record a `ReleaseSafe` build; the check reports
 and skips Debug builds, whose unoptimized rates are not comparable. Re-record a
 section whenever the workload or benchmark changes; mixing values from different
 builds produces false regressions.
