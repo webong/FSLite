@@ -8,8 +8,9 @@
 extern "C" {
 #endif
 
-/* Experimental ABI revision 6 adds read-only integrity checking. Existing signatures,
- * layouts, status codes and kind values are unchanged and use fixed widths. */
+/* Experimental ABI revision 7 adds extended metadata, configurable limits, and
+ * volume diagnostics. Existing signatures, layouts, status codes and kind
+ * values are unchanged and use fixed widths. */
 typedef struct fslite_volume fslite_volume;
 typedef struct fslite_writer fslite_writer;
 typedef struct fslite_backup fslite_backup;
@@ -44,12 +45,61 @@ typedef struct fslite_info {
     uint32_t reserved; /* Always zero. */
 } fslite_info;
 
+/* Extended metadata for one path. chunks and allocated count physically stored
+ * chunk rows, so sparse holes reduce both without changing size. depth is the
+ * number of path components (root is 0). reserved is always zero. */
+typedef struct fslite_file_info {
+    uint64_t id;
+    uint64_t size;
+    uint64_t chunks;
+    uint64_t allocated;
+    uint32_t kind;
+    uint32_t depth;
+    uint32_t reserved[2]; /* Always zero. */
+} fslite_file_info;
+
+/* Per-handle enforcement limits. A zero field selects the default:
+ * max_path_bytes 4096, max_name_bytes 255, max_file_size INT64_MAX,
+ * max_volume_bytes unlimited. Limits apply to operations performed by this
+ * handle; separate handles configure independently. A nonzero max_path_bytes
+ * must be 2..4096 and max_name_bytes 1..255; larger values are rejected.
+ * Limits can only change while quiescent (no active writer or backup, not
+ * inside a transaction). */
+typedef struct fslite_limits {
+    uint64_t max_path_bytes;
+    uint64_t max_name_bytes;
+    uint64_t max_file_size;
+    uint64_t max_volume_bytes;
+    uint32_t reserved[4]; /* Always zero. */
+} fslite_limits;
+
+/* Whole-volume diagnostics. directory_count includes the root. chunk_count and
+ * chunk_bytes describe physically stored rows, excluding sparse holes.
+ * database_bytes is page_size * page_count (including free pages). */
+typedef struct fslite_volume_stats {
+    uint64_t file_count;
+    uint64_t directory_count;
+    uint64_t chunk_count;
+    uint64_t chunk_bytes;
+    uint64_t logical_bytes;
+    uint64_t page_size;
+    uint64_t page_count;
+    uint64_t freelist_pages;
+    uint64_t database_bytes;
+    uint32_t in_transaction;
+    uint32_t sparse;
+    uint32_t reserved[2]; /* Always zero. */
+} fslite_volume_stats;
+
 uint32_t fslite_abi_version(void);
 /* Returns static storage, never free it. Unknown codes return "unknown status". */
 const char *fslite_status_string(fslite_status status);
 
 /* filename is a host path (UTF-8), not a URI. CREATE initializes only an empty
  * database; existing foreign databases are rejected. No flag means open-existing.
+ * FSLITE_OPEN_SPARSE lets writers skip all-zero chunks; missing
+ * chunks read as zeros. The flag is a handle-level policy and is not recorded in
+ * the volume, so every handle that must read holes as zeros must set it.
  * All strings must be NUL-terminated. out_volume is cleared on failure.
  * One handle may be used by one thread at a time; callers serialize access.
  * Separate handles use SQLite locking. No background threads are created.
@@ -122,8 +172,9 @@ fslite_status fslite_write_at(fslite_volume *volume, const char *path, uint64_t 
  * Both operations use one savepoint and participate in an explicit transaction.
  * Errors roll back the whole operation, preserving prior transaction work unless
  * SQLite aborts that transaction. Active writers/backups return INVALID_STATE.
- * Format 2 is dense: extensions materialize zero-filled chunks and may consume
- * time/disk proportional to the gap. There are no sparse holes or implicit creates.
+ * Dense handles materialize zero-filled chunks and may consume time/disk
+ * proportional to the gap; FSLITE_OPEN_SPARSE handles skip all-zero chunks and
+ * leave holes. There are no implicit creates.
  */
 fslite_status fslite_truncate(fslite_volume *volume, const char *path, uint64_t size);
 
@@ -162,6 +213,21 @@ void fslite_writer_close(fslite_writer *writer);
 fslite_status fslite_read(fslite_volume *volume, const char *path, uint64_t offset,
                          void *buffer, size_t capacity, size_t *out_read);
 fslite_status fslite_stat(fslite_volume *volume, const char *path, fslite_info *out_info);
+/* Extended metadata for one path. out_info is cleared on failure. Reads one
+ * consistent snapshot, including uncommitted work in the caller's transaction.
+ * Missing paths return NOT_FOUND; directories report zero chunks/allocated.
+ * Active writers/backups return INVALID_STATE. */
+fslite_status fslite_inspect(fslite_volume *volume, const char *path, fslite_file_info *out_info);
+/* Apply per-handle limits. A NULL pointer restores every default. Zero fields
+ * also keep their default. Returns INVALID_STATE while a writer or backup is
+ * active or inside an explicit transaction, and INVALID_ARGUMENT for values
+ * outside the ranges documented on fslite_limits. Existing data is never
+ * deleted; a limit below current usage simply makes growth fail with TOO_LARGE. */
+fslite_status fslite_set_limits(fslite_volume *volume, const fslite_limits *limits);
+/* Whole-volume diagnostics; out_stats is cleared on failure. Values describe
+ * this handle's current view, including its pending transaction work.
+ * Active writers/backups return INVALID_STATE. */
+fslite_status fslite_get_volume_stats(fslite_volume *volume, fslite_volume_stats *out_stats);
 
 /* Immediate children in bytewise name order. name and info are borrowed and
  * valid only during the callback. Return nonzero to stop (FSLITE_CANCELLED).
@@ -172,8 +238,9 @@ fslite_status fslite_list(fslite_volume *volume, const char *path,
                          fslite_list_callback callback, void *context);
 
 /* Read-only whole-volume integrity check: SQLite integrity/foreign keys, format
- * markers, node types, root/parent/name/path validity, reachability, and dense
- * chunk ownership, ordering, completeness and lengths. Returns INVALID_FORMAT
+ * markers, node types, root/parent/name/path validity, reachability, and chunk
+ * ownership, ordering and lengths. Completeness is required only for dense
+ * handles; sparse handles accept holes. Returns INVALID_FORMAT
  * for detected corruption or an unusable format schema; never repairs data.
  * All scans share one snapshot. Inside a caller transaction this includes its
  * uncommitted work and leaves it active, on success or ordinary check failure.

@@ -12,6 +12,12 @@
 _Static_assert(sizeof(fslite_status) == 4, "fixed-width status");
 _Static_assert(sizeof(fslite_info) == 24, "ABI info layout");
 _Static_assert(offsetof(fslite_info, kind) == 16, "ABI kind offset");
+_Static_assert(sizeof(fslite_file_info) == 48, "ABI file info layout");
+_Static_assert(offsetof(fslite_file_info, kind) == 32, "ABI file info kind offset");
+_Static_assert(sizeof(fslite_limits) == 48, "ABI limits layout");
+_Static_assert(offsetof(fslite_limits, max_volume_bytes) == 24, "ABI limits offset");
+_Static_assert(sizeof(fslite_volume_stats) == 88, "ABI stats layout");
+_Static_assert(offsetof(fslite_volume_stats, in_transaction) == 72, "ABI stats offset");
 
 #define CHECK(condition) do { if (!(condition)) { \
     fprintf(stderr, "%s:%d: check failed: %s\n", __FILE__, __LINE__, #condition); \
@@ -48,7 +54,7 @@ static void test_engine(void) {
     char filename[64];
     new_path(filename);
     fslite_volume *v = NULL, *other = NULL;
-    CHECK(fslite_abi_version() == 6);
+    CHECK(fslite_abi_version() == 7);
     STATUS(fslite_open(filename, 0, &v), FSLITE_INVALID_FORMAT);
     CHECK(v == NULL);
     OK(fslite_open(filename, FSLITE_OPEN_CREATE, &v));
@@ -463,6 +469,146 @@ static void test_foreign_databases(void) {
 }
 #endif
 
+static void test_metadata_limits_stats(void) {
+    char filename[64];
+    new_path(filename);
+    fslite_volume *v = NULL;
+    OK(fslite_open(filename, FSLITE_OPEN_CREATE, &v));
+
+    OK(fslite_mkdir(v, "/dir"));
+    unsigned char payload[70000];
+    for (size_t i = 0; i < sizeof payload; ++i) payload[i] = (unsigned char)(i * 7 + 1);
+    OK(fslite_write(v, "/dir/data", payload, sizeof payload));
+
+    fslite_file_info file;
+    OK(fslite_inspect(v, "/dir/data", &file));
+    CHECK(file.kind == FSLITE_FILE && file.size == sizeof payload && file.depth == 2);
+    CHECK(file.chunks == 2 && file.allocated == sizeof payload);
+    CHECK(file.reserved[0] == 0 && file.reserved[1] == 0);
+    fslite_file_info dir;
+    OK(fslite_inspect(v, "/dir", &dir));
+    CHECK(dir.kind == FSLITE_DIRECTORY && dir.size == 0 && dir.depth == 1);
+    CHECK(dir.chunks == 0 && dir.allocated == 0);
+    fslite_file_info root;
+    OK(fslite_inspect(v, "/", &root));
+    CHECK(root.id == 1 && root.kind == FSLITE_DIRECTORY && root.depth == 0);
+    STATUS(fslite_inspect(v, "/missing", &file), FSLITE_NOT_FOUND);
+    CHECK(file.id == 0 && file.size == 0 && file.chunks == 0 && file.allocated == 0);
+
+    fslite_volume_stats stats;
+    OK(fslite_get_volume_stats(v, &stats));
+    CHECK(stats.file_count == 1 && stats.directory_count == 2);
+    CHECK(stats.chunk_count == 2 && stats.chunk_bytes == sizeof payload);
+    CHECK(stats.logical_bytes == sizeof payload);
+    CHECK(stats.page_size > 0 && stats.page_count > 0);
+    CHECK(stats.database_bytes == stats.page_size * stats.page_count);
+    CHECK(stats.freelist_pages <= stats.page_count);
+    CHECK(stats.in_transaction == 0 && stats.sparse == 0);
+    CHECK(stats.reserved[0] == 0 && stats.reserved[1] == 0);
+
+    // Diagnostics observe this handle's uncommitted work.
+    OK(fslite_begin(v));
+    OK(fslite_write(v, "/dir/extra", "abcd", 4));
+    OK(fslite_get_volume_stats(v, &stats));
+    CHECK(stats.file_count == 2 && stats.in_transaction == 1);
+    OK(fslite_rollback(v));
+    OK(fslite_get_volume_stats(v, &stats));
+    CHECK(stats.file_count == 1 && stats.in_transaction == 0);
+
+    fslite_limits limits;
+    memset(&limits, 0, sizeof limits);
+    limits.max_file_size = 1000;
+    limits.max_volume_bytes = 1500;
+    limits.max_path_bytes = 32;
+    limits.max_name_bytes = 8;
+    OK(fslite_set_limits(v, &limits));
+    STATUS(fslite_get_volume_stats(v, &stats), FSLITE_OK);
+
+    fslite_info info;
+    STATUS(fslite_write(v, "/dir/too-big", payload, 1001), FSLITE_TOO_LARGE);
+    STATUS(fslite_stat(v, "/dir/too-big", &info), FSLITE_NOT_FOUND);
+    STATUS(fslite_truncate(v, "/dir/data", 70001), FSLITE_TOO_LARGE);
+    STATUS(fslite_write_at(v, "/dir/data", 70499, "x", 1), FSLITE_TOO_LARGE);
+    // Shrinking is always allowed, even below a newly configured limit.
+    OK(fslite_truncate(v, "/dir/data", 500));
+    OK(fslite_inspect(v, "/dir/data", &file));
+    CHECK(file.size == 500 && file.chunks == 1 && file.allocated == 500);
+
+    // Path and name limits use UTF-8 byte counts.
+    STATUS(fslite_mkdir(v, "/012345678"), FSLITE_INVALID_ARGUMENT);
+    char long_path[64] = "/";
+    memset(long_path + 1, 'a', 40);
+    long_path[41] = 0;
+    STATUS(fslite_mkdir(v, long_path), FSLITE_INVALID_ARGUMENT);
+
+    // Volume accounting: 500 + 1000 fits exactly; one more byte does not.
+    OK(fslite_write(v, "/dir/second", payload, 1000));
+    OK(fslite_write(v, "/dir/second", payload, 1000)); // replacement, not growth
+    STATUS(fslite_write(v, "/dir/third", "x", 1), FSLITE_TOO_LARGE);
+    STATUS(fslite_stat(v, "/dir/third", &info), FSLITE_NOT_FOUND);
+
+    // Limits may only change while quiescent.
+    OK(fslite_begin(v));
+    STATUS(fslite_set_limits(v, NULL), FSLITE_INVALID_STATE);
+    OK(fslite_rollback(v));
+    fslite_writer *writer = NULL;
+    OK(fslite_writer_open(v, "/stream", &writer));
+    STATUS(fslite_set_limits(v, NULL), FSLITE_INVALID_STATE);
+    fslite_writer_close(writer);
+
+    // NULL restores every default.
+    OK(fslite_set_limits(v, NULL));
+    OK(fslite_write(v, "/dir/third", payload, sizeof payload));
+
+    // A file larger than a lowered per-file limit can still be modified in place.
+    OK(fslite_write(v, "/dir/large", payload, 2000));
+    memset(&limits, 0, sizeof limits);
+    limits.max_file_size = 1000;
+    OK(fslite_set_limits(v, &limits));
+    OK(fslite_write_at(v, "/dir/large", 0, "tiny", 4));
+    STATUS(fslite_write_at(v, "/dir/large", 2000, "x", 1), FSLITE_TOO_LARGE);
+    OK(fslite_truncate(v, "/dir/large", 800));
+    OK(fslite_truncate(v, "/dir/large", 900));
+    STATUS(fslite_truncate(v, "/dir/large", 1001), FSLITE_TOO_LARGE);
+
+    // A volume limit below current usage also permits non-growing writes.
+    memset(&limits, 0, sizeof limits);
+    limits.max_volume_bytes = 100;
+    OK(fslite_set_limits(v, &limits));
+    OK(fslite_write_at(v, "/dir/large", 0, "t", 1));
+    STATUS(fslite_write_at(v, "/dir/large", 900, "xx", 2), FSLITE_TOO_LARGE);
+    OK(fslite_set_limits(v, NULL));
+
+    memset(&limits, 0, sizeof limits);
+    limits.max_path_bytes = 4097;
+    STATUS(fslite_set_limits(v, &limits), FSLITE_INVALID_ARGUMENT);
+    memset(&limits, 0, sizeof limits);
+    limits.max_name_bytes = 256;
+    STATUS(fslite_set_limits(v, &limits), FSLITE_INVALID_ARGUMENT);
+    memset(&limits, 0, sizeof limits);
+    limits.max_file_size = (uint64_t)INT64_MAX + 1;
+    STATUS(fslite_set_limits(v, &limits), FSLITE_INVALID_ARGUMENT);
+    STATUS(fslite_set_limits(NULL, &limits), FSLITE_INVALID_ARGUMENT);
+
+    fslite_close(v);
+    CHECK(unlink(filename) == 0);
+
+    // Sparse volumes expose storage accounting through the same APIs.
+    char sparse_name[64];
+    new_path(sparse_name);
+    fslite_volume *sparse = NULL;
+    OK(fslite_open(sparse_name, FSLITE_OPEN_CREATE | FSLITE_OPEN_SPARSE, &sparse));
+    OK(fslite_write(sparse, "/sparse", NULL, 0));
+    OK(fslite_write_at(sparse, "/sparse", 0, "A", 1));
+    OK(fslite_write_at(sparse, "/sparse", 65536 * 2, "B", 1));
+    OK(fslite_inspect(sparse, "/sparse", &file));
+    CHECK(file.size == 65536 * 2 + 1 && file.chunks == 2 && file.allocated == 65537);
+    OK(fslite_get_volume_stats(sparse, &stats));
+    CHECK(stats.sparse == 1 && stats.chunk_count == 2 && stats.chunk_bytes == 65537);
+    fslite_close(sparse);
+    CHECK(unlink(sparse_name) == 0);
+}
+
 void test_namespace(void);
 void test_backup(void);
 void test_random_access(void);
@@ -480,6 +626,7 @@ int main(void) {
     test_invalid_arguments();
     test_streaming();
     test_statement_reuse();
+    test_metadata_limits_stats();
 #ifdef FSLITE_TEST_SQLITE
     test_foreign_databases();
     test_stream_failures_and_format();

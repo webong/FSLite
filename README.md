@@ -11,7 +11,11 @@ loop, garbage collector, or background service.
 - Atomic whole-file creation/replacement, ranged reads into caller-owned buffers.
 - 64 KiB content chunks and sequential streaming writes with bounded buffering.
 - Random-access writes and truncation with zero-filled extension and atomic updates.
-- File metadata (`id`, `size`, `kind`) and ordered directory listing.
+- File metadata (`id`, `size`, `kind`), extended per-path inspection (stored
+  chunks and allocated bytes), and ordered directory listing.
+- Per-handle configurable limits for path, name, file, and total volume size.
+- Whole-volume diagnostics: node/chunk counts, logical and stored bytes, page
+  and freelist accounting, and transaction/sparse state.
 - Atomic rename with replacement, and removal of files or empty directories.
 - Consistent live export and incremental backups with cancellation and atomic publication.
 - Read-only whole-volume integrity checking, including hierarchy and chunk validation.
@@ -21,11 +25,14 @@ loop, garbage collector, or background service.
 - Bundled official SQLite 3.54.1; the host does not need to install SQLite.
 
 This is an **experimental first implementation**, not a production filesystem.
-ABI revision 6 adds integrity checking, preserving existing
-function signatures, structure layouts, and status values. The on-disk format
+ABI revision 7 adds extended metadata, configurable limits, and volume
+diagnostics, preserving existing function signatures, structure layouts, and
+status values. The on-disk format
 remains version 2. **Volume format 2 replaces the previous single-BLOB layout.**
-Version-1 volumes are rejected without modification, including with CREATE; no
-migration is implemented yet. Keep the previous engine to read/export old volumes.
+Version-1 volumes are rejected without modification, including with CREATE;
+`fslite_migrate` initializes empty databases and repairs version markers on v2
+schemas, but cannot reconstruct the legacy single-BLOB layout. Keep the previous
+engine to read/export old volumes.
 Compatibility is not yet promised across releases.
 
 The engine buffers at most one 64 KiB content chunk per active writer or random-access mutation, in addition
@@ -271,9 +278,11 @@ back all its changes while preserving prior work unless SQLite aborts the whole
 transaction. A reserved writer or backup blocks both operations on that handle.
 
 Offsets and resulting file sizes must fit INT64_MAX; individual input buffers
-must fit PTRDIFF_MAX. Format 2 remains dense: growing by a large amount writes
-zero-filled chunks proportional to the extension. This implementation does not
-provide sparse holes, per-operation quotas, or partial-success byte counts.
+must fit PTRDIFF_MAX. By default format 2 is dense: growing by a large amount
+writes zero-filled chunks proportional to the extension. Opening with
+`FSLITE_OPEN_SPARSE` skips all-zero chunks instead, and missing chunks read as
+zeros; the flag is a handle policy, not part of the volume. This implementation
+does not provide per-operation quotas or partial-success byte counts.
 See [examples/random_access.c](examples/random_access.c) for a C transaction
 that edits, shrinks, and regrows a file.
 
@@ -402,9 +411,8 @@ The authoritative ABI is [include/fslite.h](include/fslite.h).
 
 1. Broader fault-injection and concurrent workloads; optional recursive removal.
 2. Benchmark baselines across hardware, explicit format migration, and optional sparse storage.
-3. Richer metadata, configurable limits, diagnostics, and backup-platform coverage.
-4. C ABI compatibility tests across platforms and release packaging.
-5. Optional bindings, CLI, filesystem mounts, and browser storage integration.
+3. C ABI compatibility tests across platforms and release packaging.
+4. Optional bindings, CLI, filesystem mounts, and browser storage integration.
 
 ## Layout
 

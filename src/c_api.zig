@@ -2,6 +2,9 @@ const std = @import("std");
 const engine = @import("engine.zig");
 const Volume = engine.Volume;
 const Info = engine.Info;
+const FileInfo = engine.FileInfo;
+const Limits = engine.Limits;
+const VolumeStats = engine.VolumeStats;
 const Writer = engine.Writer;
 const Backup = engine.Backup;
 
@@ -27,7 +30,7 @@ fn status(err: engine.Error) i32 {
 }
 
 export fn fslite_abi_version() u32 {
-    return 6;
+    return 7;
 }
 
 export fn fslite_status_string(code: i32) [*:0]const u8 {
@@ -169,6 +172,41 @@ export fn fslite_stat(volume: ?*Volume, path: ?[*:0]const u8, output: ?*Info) i3
     const info = v.stat(std.mem.span(p)) catch |err| return status(err);
     op.finish() catch |err| return status(err);
     out.* = info;
+    return 0;
+}
+
+export fn fslite_inspect(volume: ?*Volume, path: ?[*:0]const u8, output: ?*FileInfo) i32 {
+    const out = output orelse return 1;
+    out.* = .{ .id = 0, .size = 0, .chunks = 0, .allocated = 0, .kind = 0, .depth = 0 };
+    const v = volume orelse return 1;
+    const p = path orelse return 1;
+    var op = engine.Operation.start(v) catch |err| return status(err);
+    defer op.deinit();
+    const info = v.inspect(std.mem.span(p)) catch |err| return status(err);
+    op.finish() catch |err| return status(err);
+    out.* = info;
+    return 0;
+}
+
+export fn fslite_set_limits(volume: ?*Volume, limits: ?*const Limits) i32 {
+    const v = volume orelse return 1;
+    v.setLimits(if (limits) |l| l.* else Limits{}) catch |err| return status(err);
+    return 0;
+}
+
+export fn fslite_get_volume_stats(volume: ?*Volume, output: ?*VolumeStats) i32 {
+    const out = output orelse return 1;
+    out.* = std.mem.zeroes(VolumeStats);
+    const v = volume orelse return 1;
+    // The API's own savepoint is not caller state; report the transaction flag
+    // observed before the snapshot begins.
+    const in_transaction = @intFromBool(v.inTransaction());
+    var op = engine.Operation.start(v) catch |err| return status(err);
+    defer op.deinit();
+    var stats = v.volumeStats() catch |err| return status(err);
+    op.finish() catch |err| return status(err);
+    stats.in_transaction = in_transaction;
+    out.* = stats;
     return 0;
 }
 
@@ -355,24 +393,15 @@ export fn fslite_migrate(volume: ?[*:0]const u8) i32 {
     const version = c_api_scalar(db_nonnull, "PRAGMA user_version") catch |e| return status(e);
     if (app == 0x46534c54 and version == 2) return 0; // Already v2
 
-    const tables = c_api_scalar(
-        db_nonnull,
-        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-    ) catch |e| return status(e);
+    const tables = c_api_scalar(db_nonnull, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'") catch |e| return status(e);
     if (tables == 0) {
         if (engine.c.sqlite3_exec(db, @embedFile("schema.sql"), null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
         if (engine.c.sqlite3_exec(db, "PRAGMA application_id=0x46534c54; PRAGMA user_version=2;", null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
         return 0;
     }
 
-    const has_nodes = c_api_scalar(
-        db_nonnull,
-        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'"
-    ) catch |e| return status(e);
-    const has_chunks = c_api_scalar(
-        db_nonnull,
-        "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'"
-    ) catch |e| return status(e);
+    const has_nodes = c_api_scalar(db_nonnull, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'") catch |e| return status(e);
+    const has_chunks = c_api_scalar(db_nonnull, "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'") catch |e| return status(e);
     if (has_nodes == 1 and has_chunks == 1) {
         if (engine.c.sqlite3_exec(db, "PRAGMA application_id=0x46534c54; PRAGMA user_version=2;", null, null, null) != engine.c.SQLITE_OK) return status(engine.Error.Internal);
         return 0;

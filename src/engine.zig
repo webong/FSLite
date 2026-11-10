@@ -30,6 +30,52 @@ pub const Info = extern struct {
     kind: u32,
     reserved: u32 = 0,
 };
+
+/// Extended per-path metadata. `chunks` and `allocated` describe stored chunk
+/// rows, so sparse holes reduce both values without changing the logical size.
+pub const FileInfo = extern struct {
+    id: u64,
+    size: u64,
+    chunks: u64,
+    allocated: u64,
+    kind: u32,
+    depth: u32,
+    reserved: [2]u32 = .{ 0, 0 },
+};
+
+/// Public limit configuration. Zero fields select the default for that limit.
+pub const Limits = extern struct {
+    max_path_bytes: u64 = 0,
+    max_name_bytes: u64 = 0,
+    max_file_size: u64 = 0,
+    max_volume_bytes: u64 = 0,
+    reserved: [4]u32 = .{ 0, 0, 0, 0 },
+};
+
+/// Resolved limits with the zero-means-default rules applied.
+pub const ResolvedLimits = struct {
+    max_path_bytes: usize = 4096,
+    max_name_bytes: usize = 255,
+    max_file_size: u64 = std.math.maxInt(i64),
+    max_volume_bytes: u64 = std.math.maxInt(u64),
+};
+
+/// Whole-volume diagnostics returned by fslite_get_volume_stats.
+pub const VolumeStats = extern struct {
+    file_count: u64,
+    directory_count: u64,
+    chunk_count: u64,
+    chunk_bytes: u64,
+    logical_bytes: u64,
+    page_size: u64,
+    page_count: u64,
+    freelist_pages: u64,
+    database_bytes: u64,
+    in_transaction: u32,
+    sparse: u32,
+    reserved: [2]u32 = .{ 0, 0 },
+};
+
 pub const Callback = *const fn (?*anyopaque, [*]const u8, usize, *const Info) callconv(.c) i32;
 
 pub const Volume = struct {
@@ -42,6 +88,7 @@ pub const Volume = struct {
     prepared_statements: std.ArrayList(*c.sqlite3_stmt),
     last_adapt_time_us: u64 = 0,
     sparse: bool = false,
+    limits: ResolvedLimits = .{},
 
     pub fn open(filename: [:0]const u8, create: bool, sparse: bool) Error!*Volume {
         if (filename.len == 0 or !std.unicode.utf8ValidateSlice(filename)) return error.InvalidArgument;
@@ -55,7 +102,7 @@ pub const Volume = struct {
         try check(rc);
         const self = try allocator.create(Volume);
         errdefer allocator.destroy(self);
-        
+
         self.* = .{
             .db = db.?,
             .cache_stats = CacheStats{},
@@ -112,9 +159,7 @@ pub const Volume = struct {
         // V1 used a single-BLOB layout; v2 uses nodes/chunks tables.
         // Since we don't have the v1 schema definition, attempt a best-effort
         // migration by reading all user tables and reconstructing.
-        const tables = try self.scalar(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        );
+        const tables = try self.scalar("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'");
         if (tables == 0) {
             // Empty database - initialize as v2
             try self.exec(@embedFile("schema.sql"));
@@ -123,12 +168,8 @@ pub const Volume = struct {
         }
 
         // Check if nodes and chunks tables already exist (v2 schema)
-        const has_nodes = try self.scalar(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'"
-        );
-        const has_chunks = try self.scalar(
-            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'"
-        );
+        const has_nodes = try self.scalar("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='nodes'");
+        const has_chunks = try self.scalar("SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='chunks'");
         if (has_nodes == 1 and has_chunks == 1) {
             // Tables exist but wrong version - just update version
             try self.exec("PRAGMA application_id=0x46534c54; PRAGMA user_version=2;");
@@ -306,6 +347,126 @@ pub const Volume = struct {
         return c.sqlite3_get_autocommit(self.db) == 0;
     }
 
+    /// Apply a limit configuration. Zero fields keep their documented default.
+    /// Limits may only change while the volume is quiescent: no writer, backup,
+    /// or explicit transaction. Rejecting impossible values keeps every accepted
+    /// path within the on-disk format's fixed bounds.
+    pub fn setLimits(self: *Volume, config: Limits) Error!void {
+        if (self.writer != null or self.backup != null or self.inTransaction())
+            return error.InvalidState;
+        var resolved = ResolvedLimits{};
+        if (config.max_path_bytes != 0) {
+            if (config.max_path_bytes < 2 or config.max_path_bytes > 4096) return error.InvalidArgument;
+            resolved.max_path_bytes = @intCast(config.max_path_bytes);
+        }
+        if (config.max_name_bytes != 0) {
+            if (config.max_name_bytes > 255) return error.InvalidArgument;
+            resolved.max_name_bytes = @intCast(config.max_name_bytes);
+        }
+        if (config.max_file_size != 0) {
+            if (config.max_file_size > std.math.maxInt(i64)) return error.InvalidArgument;
+            resolved.max_file_size = config.max_file_size;
+        }
+        if (config.max_volume_bytes != 0)
+            resolved.max_volume_bytes = config.max_volume_bytes;
+        self.limits = resolved;
+    }
+
+    /// Extended metadata for one path, including stored chunk accounting.
+    pub fn inspect(self: *Volume, path: []const u8) Error!FileInfo {
+        const node = try self.stat(path);
+        var depth: u32 = 0;
+        var parts = std.mem.tokenizeScalar(u8, path, '/');
+        while (parts.next()) |_| depth += 1;
+        var chunks: u64 = 0;
+        var allocated: u64 = 0;
+        if (node.kind == 1) {
+            const stmt = try self.prepare(
+                "SELECT count(*), coalesce(sum(length(data)),0) FROM chunks WHERE node_id=?1",
+            );
+            defer stmt.close();
+            try stmt.integer(1, @intCast(node.id));
+            if (try stmt.row()) {
+                chunks = @intCast(c.sqlite3_column_int64(stmt.ptr, 0));
+                allocated = @intCast(c.sqlite3_column_int64(stmt.ptr, 1));
+            }
+        }
+        return .{
+            .id = node.id,
+            .size = node.size,
+            .chunks = chunks,
+            .allocated = allocated,
+            .kind = node.kind,
+            .depth = depth,
+        };
+    }
+
+    /// Whole-volume diagnostics. Directory count includes the root. Chunk values
+    /// describe physically stored rows, so sparse holes are not counted.
+    pub fn volumeStats(self: *Volume) Error!VolumeStats {
+        var result = VolumeStats{
+            .file_count = 0,
+            .directory_count = 0,
+            .chunk_count = 0,
+            .chunk_bytes = 0,
+            .logical_bytes = 0,
+            .page_size = 0,
+            .page_count = 0,
+            .freelist_pages = 0,
+            .database_bytes = 0,
+            .in_transaction = 0,
+            .sparse = @intFromBool(self.sparse),
+        };
+        {
+            const stmt = try self.prepare(
+                "SELECT count(*), coalesce(sum(size),0) FROM nodes WHERE kind=1",
+            );
+            defer stmt.close();
+            if (try stmt.row()) {
+                result.file_count = @intCast(c.sqlite3_column_int64(stmt.ptr, 0));
+                result.logical_bytes = @intCast(c.sqlite3_column_int64(stmt.ptr, 1));
+            }
+        }
+        result.directory_count = @intCast(try self.scalar("SELECT count(*) FROM nodes WHERE kind=2"));
+        {
+            const stmt = try self.prepare(
+                "SELECT count(*), coalesce(sum(length(data)),0) FROM chunks",
+            );
+            defer stmt.close();
+            if (try stmt.row()) {
+                result.chunk_count = @intCast(c.sqlite3_column_int64(stmt.ptr, 0));
+                result.chunk_bytes = @intCast(c.sqlite3_column_int64(stmt.ptr, 1));
+            }
+        }
+        result.page_size = @intCast(try self.scalar("PRAGMA page_size"));
+        result.page_count = @intCast(try self.scalar("PRAGMA page_count"));
+        result.freelist_pages = @intCast(try self.scalar("PRAGMA freelist_count"));
+        result.database_bytes = result.page_size * result.page_count;
+        result.in_transaction = @intFromBool(self.inTransaction());
+        return result;
+    }
+
+    /// Reject a mutation that would grow the sum of file sizes past the limit.
+    /// A replacement or shrink never fails because the configuration was lowered
+    /// below current usage; only growth beyond the maximum is rejected.
+    fn checkVolumeLimit(self: *Volume, id: u64, new_size: u64) Error!void {
+        const maximum = self.limits.max_volume_bytes;
+        if (maximum == std.math.maxInt(u64)) return;
+        const stmt = try self.prepare(
+            "SELECT coalesce(sum(size),0), coalesce((SELECT size FROM nodes WHERE id=?1),0) " ++
+                "FROM nodes WHERE kind=1",
+        );
+        defer stmt.close();
+        try stmt.integer(1, @intCast(id));
+        if (!try stmt.row()) return error.Internal;
+        const total = c.sqlite3_column_int64(stmt.ptr, 0);
+        const current = c.sqlite3_column_int64(stmt.ptr, 1);
+        if (total < 0 or current < 0 or current > total) return error.InvalidFormat;
+        if (new_size <= @as(u64, @intCast(current))) return;
+        const projected = @as(u128, @intCast(total)) - @as(u64, @intCast(current)) + new_size;
+        if (projected > maximum) return error.TooLarge;
+    }
+
     pub fn begin(self: *Volume) Error!void {
         if (self.writer != null or self.backup != null or self.inTransaction()) return error.InvalidState;
         try self.exec("BEGIN IMMEDIATE");
@@ -338,7 +499,7 @@ pub const Volume = struct {
     }
 
     pub fn stat(self: *Volume, path: []const u8) Error!Info {
-        try validatePath(path);
+        try validatePath(path, self.limits);
         var current: Info = .{ .id = 1, .kind = 2, .size = 0 };
         var parts = std.mem.tokenizeScalar(u8, path, '/');
         while (parts.next()) |part| {
@@ -349,7 +510,7 @@ pub const Volume = struct {
     }
 
     fn parentOf(self: *Volume, path: []const u8) Error!struct { id: u64, name: []const u8 } {
-        try validatePath(path);
+        try validatePath(path, self.limits);
         if (path.len == 1) return error.IsDirectory;
         const split = std.mem.lastIndexOfScalar(u8, path, '/').?;
         const parent = try self.stat(if (split == 0) "/" else path[0..split]);
@@ -385,7 +546,7 @@ pub const Volume = struct {
     }
 
     pub fn remove(self: *Volume, path: []const u8) Error!void {
-        try validatePath(path);
+        try validatePath(path, self.limits);
         if (path.len == 1) return error.InvalidArgument;
         const node = try self.stat(path);
         try self.requireEmpty(node);
@@ -393,7 +554,7 @@ pub const Volume = struct {
     }
 
     pub fn removeRecursive(self: *Volume, path: []const u8) Error!void {
-        try validatePath(path);
+        try validatePath(path, self.limits);
         if (path.len == 1) return error.InvalidArgument;
         const node = try self.stat(path);
 
@@ -402,7 +563,7 @@ pub const Volume = struct {
             var children = try self.listChildren(node.id);
             defer children.deinit(allocator);
             for (children.items) |child_name| {
-                const child_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{path, child_name}) catch continue;
+                const child_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, child_name }) catch continue;
                 try self.removeRecursive(child_path);
                 allocator.free(child_path);
             }
@@ -427,8 +588,8 @@ pub const Volume = struct {
     }
 
     pub fn rename(self: *Volume, source: []const u8, destination: []const u8) Error!void {
-        try validatePath(source);
-        try validatePath(destination);
+        try validatePath(source, self.limits);
+        try validatePath(destination, self.limits);
         if (source.len == 1 or destination.len == 1) return error.InvalidArgument;
         const node = try self.stat(source);
         if (std.mem.eql(u8, source, destination)) return;
@@ -454,7 +615,7 @@ pub const Volume = struct {
             );
             defer stmt.close();
             try stmt.integer(1, @intCast(node.id));
-            try stmt.integer(2, @intCast(4096 - destination.len));
+            try stmt.integer(2, @intCast(self.limits.max_path_bytes - destination.len));
             if (try stmt.row()) return error.InvalidArgument;
         }
         if (existing) |target| try self.deleteNode(target.id);
@@ -481,8 +642,12 @@ pub const Volume = struct {
         if (data.len == 0) return;
         const end = offset + data.len;
         const size = @max(node.size, end);
+        // A lowered limit never blocks in-place modification of an existing file;
+        // only growth beyond the configured maximum fails.
+        if (end > node.size and end > self.limits.max_file_size) return error.TooLarge;
         // Extension also pads the old final chunk and materializes any gap.
         const first = if (end > node.size) @min(offset, node.size) / chunk_size else offset / chunk_size;
+        try self.checkVolumeLimit(node.id, size);
         try self.patchChunks(node, first, (end - 1) / chunk_size, size, offset, data);
         if (size != node.size) try self.setSize(node.id, size);
     }
@@ -492,6 +657,8 @@ pub const Volume = struct {
         const node = try self.stat(path);
         if (node.kind == 2) return error.IsDirectory;
         if (size == node.size) return;
+        if (size > self.limits.max_file_size and size > node.size) return error.TooLarge;
+        try self.checkVolumeLimit(node.id, size);
         if (size < node.size) {
             {
                 const stmt = try self.prepare("DELETE FROM chunks WHERE node_id=?1 AND chunk_index>=?2");
@@ -788,6 +955,9 @@ pub const Writer = struct {
         errdefer self.abort();
         if (!volume.inTransaction()) return error.InvalidState;
         if (data.len > @as(u64, std.math.maxInt(i64)) - self.size) return error.TooLarge;
+        if (self.size > volume.limits.max_file_size or
+            data.len > volume.limits.max_file_size - self.size) return error.TooLarge;
+        try volume.checkVolumeLimit(self.node_id, self.size + data.len);
         var remaining = data;
         while (remaining.len > 0) {
             const take = @min(chunk_size - self.used, remaining.len);
@@ -820,6 +990,8 @@ pub const Writer = struct {
         const volume = self.volume orelse return error.InvalidState;
         errdefer self.abort();
         if (!volume.inTransaction()) return error.InvalidState;
+        if (self.size > volume.limits.max_file_size) return error.TooLarge;
+        try volume.checkVolumeLimit(self.node_id, self.size);
         try self.flush();
         {
             const stmt = try volume.prepare("UPDATE nodes SET size=?2 WHERE id=?1");
@@ -929,13 +1101,13 @@ pub fn check(rc: c_int) Error!void {
     }
 }
 
-fn validatePath(path: []const u8) Error!void {
-    if (path.len == 0 or path.len > 4096 or path[0] != '/' or
+fn validatePath(path: []const u8, limits: ResolvedLimits) Error!void {
+    if (path.len == 0 or path.len > limits.max_path_bytes or path[0] != '/' or
         !std.unicode.utf8ValidateSlice(path)) return error.InvalidArgument;
     if (path.len == 1) return;
     var parts = std.mem.splitScalar(u8, path[1..], '/');
     while (parts.next()) |part| {
-        if (part.len == 0 or part.len > 255 or std.mem.eql(u8, part, ".") or
+        if (part.len == 0 or part.len > limits.max_name_bytes or std.mem.eql(u8, part, ".") or
             std.mem.eql(u8, part, "..")) return error.InvalidArgument;
     }
 }
@@ -1080,8 +1252,8 @@ pub const HotPathCacheManager = struct {
 
     pub fn totalSize(self: HotPathCacheManager) usize {
         return self.path_lookups.items.len + self.file_operations.items.len +
-               self.chunk_operations.items.len + self.backup_operations.items.len +
-               self.schema_operations.items.len;
+            self.chunk_operations.items.len + self.backup_operations.items.len +
+            self.schema_operations.items.len;
     }
 
     pub fn clearAll(self: *HotPathCacheManager) void {
@@ -1330,7 +1502,7 @@ pub const BenchmarkRunner = struct {
     iterations: usize = 30,
     warmup_iterations: usize = 5,
 
-    pub fn runBenchmark(self: *BenchmarkRunner, name: []const u8, benchmark_fn: *const fn() void) struct {
+    pub fn runBenchmark(self: *BenchmarkRunner, name: []const u8, benchmark_fn: *const fn () void) struct {
         name: []const u8,
         iterations: usize,
         total_time_ns: u64,

@@ -73,7 +73,8 @@ the file. Truncation to the current size is also a no-op. Both enforce the signe
 The engine reads and validates each affected existing chunk, patches it in a
 reused 64 KiB heap buffer, and upserts the new chunk data. Unaffected chunks are
 not rewritten. Extension pads the old partial tail and inserts all intervening
-chunks as needed; no sparse holes are introduced. Shrinking deletes chunks beyond
+chunks as needed by dense handles; FSLITE_OPEN_SPARSE handles skip all-zero
+chunks and leave holes that read as zeros. Shrinking deletes chunks beyond
 the new EOF and shortens a retained partial tail. Later growth cannot expose
 discarded bytes because deleted/shortened data is replaced with zeros.
 
@@ -144,9 +145,11 @@ Inspecting volumes with SQLite tools is useful for diagnostics. Direct schema or
 data mutation is unsupported: SQL constraints enforce only part of the filesystem
 invariants. Open validates format markers and the root; read checks only requested
 content. `fslite_check` performs a whole-volume scan of SQLite integrity and foreign
-keys, markers, node types, names, parents, reachability/path limits, and dense
-chunk ownership, indices, counts, and lengths. The scan shares one savepoint
+keys, markers, node types, names, parents, reachability/path limits, and chunk
+ownership, indices, and lengths. Chunk completeness is required for dense
+handles; sparse handles accept holes read as zeros. The scan shares one savepoint
 snapshot and includes caller-transaction changes without committing them. It is
 read-only and returns INVALID_FORMAT on detected corruption; it does not repair,
-authenticate the schema/content, or migrate the format. ABI revision 6 adds this
-function without changing volume format 2.
+authenticate the schema/content, or migrate the format. ABI revision 7 adds this
+function plus read-only metadata, limits, and diagnostics without changing
+volume format 2.

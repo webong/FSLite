@@ -88,7 +88,80 @@ static void check_sentinel(const char *filename) {
     CHECK(memcmp(bytes, "keep", 4) == 0 && fclose(f) == 0);
 }
 
+/* Cross-platform backup coverage: page-by-page publication preserves both a
+ * sparse volume (holes stay holes) and a dense multi-chunk file byte-for-byte. */
+static void test_backup_stepwise_and_sparse(void) {
+    char directory[] = "/tmp/fslite-backup-extra-XXXXXX";
+    CHECK(mkdtemp(directory) != NULL);
+    char source[1024], destination[1024];
+    path(source, directory, "source.fslite");
+    path(destination, directory, "snapshot.fslite");
+    fslite_volume *v = NULL, *copy = NULL;
+    fslite_backup *backup = NULL;
+    fslite_backup_progress progress;
+    fslite_file_info file;
+
+    // A sparse source backs up without materializing its holes.
+    OK(fslite_open(source, FSLITE_OPEN_CREATE | FSLITE_OPEN_SPARSE, &v));
+    OK(fslite_write(v, "/sparse", NULL, 0));
+    OK(fslite_write_at(v, "/sparse", 0, "A", 1));
+    OK(fslite_write_at(v, "/sparse", 65536 * 3, "B", 1));
+    OK(fslite_inspect(v, "/sparse", &file));
+    CHECK(file.size == 65536 * 3 + 1 && file.chunks == 2 && file.allocated == 65537);
+    OK(fslite_backup_open(v, destination, &backup));
+    int steps = 0;
+    do {
+        OK(fslite_backup_step(backup, 1, &progress));
+        CHECK(progress.remaining_pages <= progress.total_pages);
+        CHECK(++steps < 1000000);
+    } while (!progress.done);
+    OK(fslite_backup_finish(backup));
+    fslite_backup_close(backup);
+    OK(fslite_open(destination, FSLITE_OPEN_SPARSE, &copy));
+    OK(fslite_check(copy));
+    OK(fslite_inspect(copy, "/sparse", &file));
+    CHECK(file.size == 65536 * 3 + 1 && file.chunks == 2 && file.allocated == 65537);
+    char byte = 'x';
+    size_t n = 99;
+    OK(fslite_read(copy, "/sparse", 0, &byte, 1, &n));
+    CHECK(n == 1 && byte == 'A');
+    OK(fslite_read(copy, "/sparse", 65536, &byte, 1, &n));
+    CHECK(n == 1 && byte == 0);
+    OK(fslite_read(copy, "/sparse", 65536 * 3, &byte, 1, &n));
+    CHECK(n == 1 && byte == 'B');
+    fslite_close(copy);
+    fslite_close(v);
+    CHECK(unlink(destination) == 0);
+    CHECK(unlink(source) == 0);
+
+    // A dense multi-chunk file survives one-page-at-a-time publication.
+    OK(fslite_open(source, FSLITE_OPEN_CREATE, &v));
+    unsigned char data[65536 * 2 + 123];
+    for (size_t i = 0; i < sizeof data; ++i) data[i] = (unsigned char)(i * 13 + 7);
+    OK(fslite_write(v, "/dense", data, sizeof data));
+    OK(fslite_backup_open(v, destination, &backup));
+    steps = 0;
+    do {
+        OK(fslite_backup_step(backup, 1, &progress));
+        CHECK(progress.remaining_pages <= progress.total_pages);
+        CHECK(++steps < 1000000);
+    } while (!progress.done);
+    OK(fslite_backup_finish(backup));
+    fslite_backup_close(backup);
+    OK(fslite_open(destination, 0, &copy));
+    OK(fslite_check(copy));
+    unsigned char output[sizeof data];
+    size_t count = 0;
+    OK(fslite_read(copy, "/dense", 0, output, sizeof output, &count));
+    CHECK(count == sizeof data && memcmp(output, data, count) == 0);
+    STATUS(fslite_get_volume_stats(copy, NULL), FSLITE_INVALID_ARGUMENT);
+    fslite_close(copy);
+    fslite_close(v);
+    cleanup(directory);
+}
+
 void test_backup(void) {
+    test_backup_stepwise_and_sparse();
     char directory[] = "/tmp/fslite-backup-tests-XXXXXX";
     CHECK(mkdtemp(directory) != NULL);
     char source[1024], destination[1024], collision[1024];
