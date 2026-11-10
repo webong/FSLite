@@ -222,7 +222,9 @@ fslite_status fslite_inspect(fslite_volume *volume, const char *path, fslite_fil
  * also keep their default. Returns INVALID_STATE while a writer or backup is
  * active or inside an explicit transaction, and INVALID_ARGUMENT for values
  * outside the ranges documented on fslite_limits. Existing data is never
- * deleted; a limit below current usage simply makes growth fail with TOO_LARGE. */
+ * deleted. A size limit below current usage only makes growth fail with
+ * TOO_LARGE; lowering path/name limits can make existing longer paths
+ * inaccessible through this handle without modifying them. */
 fslite_status fslite_set_limits(fslite_volume *volume, const fslite_limits *limits);
 /* Whole-volume diagnostics; out_stats is cleared on failure. Values describe
  * this handle's current view, including its pending transaction work.

@@ -400,7 +400,9 @@ name bytes, file size, and total logical volume size. A zero field keeps its
 default, and `NULL` restores all defaults. Limits may only change while the
 handle is quiescent: no active writer or backup, and not inside a transaction.
 Lowering a limit never deletes data or blocks in-place edits and shrinking; only
-growth beyond a limit fails with `FSLITE_TOO_LARGE`.
+growth beyond a size limit fails with `FSLITE_TOO_LARGE`. Lowering the path or
+name limits can make existing longer paths inaccessible through that handle
+without modifying them.
 
 `fslite_get_volume_stats(volume, &stats)` reports file/directory and chunk
 counts, logical and stored bytes, database page and freelist accounting, and
