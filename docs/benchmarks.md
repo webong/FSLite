@@ -118,5 +118,7 @@ and publishes the sections in its job summary.
 
 Enforcement uses the recorded minimum as the floor with a 35% default tolerance
 (`TOLERANCE`), because the short lookup/read workloads still vary more than the
-streaming workload. Re-record a section whenever the workload or benchmark
-changes; mixing values from different builds produces false regressions.
+streaming workload. Sections record a `ReleaseSafe` build; the check reports
+and skips Debug builds, whose unoptimized rates are not comparable. Re-record a
+section whenever the workload or benchmark changes; mixing values from different
+builds produces false regressions.

@@ -126,6 +126,15 @@ echo "Current benchmark results:"
 echo "${CURRENT_OUTPUT}"
 echo ""
 
+# Baselines record ReleaseSafe. Debug builds are deliberately unoptimized and
+# much slower, so they must not be compared against those numbers.
+OPTIMIZE=$(printf '%s\n' "${CURRENT_OUTPUT}" | sed -n 's/^Optimize: //p' | head -1)
+if [[ -n "${OPTIMIZE}" && "${OPTIMIZE}" != "ReleaseSafe" ]]; then
+    echo "Benchmark optimize mode is '${OPTIMIZE}'; baselines record ReleaseSafe."
+    echo "Regression enforcement skipped."
+    exit 0
+fi
+
 CURRENT_FILE=$(mktemp)
 trap 'rm -f "${CURRENT_FILE}"' EXIT
 echo "${CURRENT_OUTPUT}" | parse_output > "${CURRENT_FILE}"

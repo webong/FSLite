@@ -57,5 +57,5 @@ jobs:
 
       - name: Benchmark regression check
         run: |
-          zig build bench -Doptimize=${{ matrix.optimize }}
+          zig build build-bench -Doptimize=${{ matrix.optimize }}
           bash ci/benchmark-regression.sh

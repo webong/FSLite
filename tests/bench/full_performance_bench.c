@@ -166,6 +166,7 @@ static void bench_random_access_simple() {
 
 int main(void) {
     printf("=== FSLite Full Performance Benchmark Suite ===\n");
+    printf("Optimize: %s\n", FSLITE_BENCH_OPTIMIZE);
     printf("Running iterations: file ops=%d, lookups=%d, reads=%d\n\n",
            ITERATIONS, LOOKUP_ITERATIONS, READ_ITERATIONS);
 
