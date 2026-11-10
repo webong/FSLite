@@ -17,3 +17,15 @@ path_lookup 148965 130842 160426 19.9
 small_file_operations 1651 1331 1841 30.9
 streaming_writes 160.7 146.5 175.6 18.1
 random_access_reads 22431 18623 22762 18.5
+
+# Hardware: github-ubuntu24-x64
+path_lookup 102944 102745 105592 2.8
+small_file_operations 1681 1652 1759 6.4
+streaming_writes 184.5 177.9 186.8 4.8
+random_access_reads 18177 17983 18337 1.9
+
+# Hardware: github-macos15-arm64
+path_lookup 160699 156686 163768 4.4
+small_file_operations 1626 1284 1811 32.4
+streaming_writes 170.8 127.1 188.5 35.9
+random_access_reads 23140 22380 25473 13.4

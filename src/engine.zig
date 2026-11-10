@@ -605,7 +605,7 @@ pub const Volume = struct {
         }
         if (node.kind == 2 and destination.len > source.len) {
             // A longer prefix must not make existing descendants unreachable
-            // through the API's 4096-byte path limit. Lengths are UTF-8 bytes.
+            // through the configured path limit. Lengths are UTF-8 bytes.
             const stmt = try self.prepare(
                 "WITH RECURSIVE descendants(id,relative_size) AS (" ++
                     "SELECT ?1,0 UNION ALL " ++
