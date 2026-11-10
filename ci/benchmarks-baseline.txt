@@ -1,11 +1,19 @@
 # FSLite Benchmark Baseline
-# Hardware: Apple M3 Pro, 18GB RAM, macOS 23.6.0
+#
+# Hardware description: Apple M3 Pro, 18GB RAM, macOS 23.6.0
 # Zig: 0.15.2
 # Build: ReleaseSafe
-# Date: 2026-11-09
+# Date: 2026-11-10
+#
+# Each section starts with `# Hardware: <normalized-key>` and contains
+# `name median min max variability` lines. The min column is the slowest of
+# five full repetitions and is the enforcement floor; median and variability
+# are informational. A section is enforced only on the matching machine;
+# unknown hardware is reported and skipped. On GitHub Actions the key is
+# github-<ImageOS>-<arch>, for example github-ubuntu24-x64.
 
-# Format: name median min max variability
-path_lookup 176471 176471 176471 0.0
-small_file_operations 2556 2556 2556 0.0
-streaming_writes 276.8 276.8 276.8 0.0
-random_access_reads 31315 31315 31315 0.0
+# Hardware: apple-m3-pro
+path_lookup 148965 130842 160426 19.9
+small_file_operations 1651 1331 1841 30.9
+streaming_writes 160.7 146.5 175.6 18.1
+random_access_reads 22431 18623 22762 18.5

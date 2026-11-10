@@ -1,0 +1,63 @@
+name: Benchmark baseline
+
+# Records a hardware-keyed baseline section for the current runner image.
+# Run this manually after benchmark or runner-image changes, then paste the
+# printed section into ci/benchmarks-baseline.txt. Enforcement itself stays in
+# the regular CI workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repetitions:
+        description: Full benchmark repetitions to record
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  record:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    defaults:
+      run:
+        shell: bash
+    env:
+      REPS: ${{ inputs.repetitions }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+          cache-key: benchmark-baseline
+
+      - name: Build benchmarks
+        run: zig build build-bench -Doptimize=ReleaseSafe
+
+      - name: Record baseline section
+        run: bash ci/benchmark-regression.sh --record | tee baseline-section.txt
+
+      - name: Publish baseline section
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.os }} baseline"
+            echo '```'
+            cat baseline-section.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

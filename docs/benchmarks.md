@@ -99,3 +99,24 @@ and must not be compared as equivalent to independently durable per-call writes.
 Repeat full runs on an otherwise idle machine, and retain the commit, compiler,
 OS, CPU, storage type/location, and raw output when comparing revisions. No
 performance targets or cross-machine conclusions are claimed by this suite.
+
+## Regression baselines
+
+`ci/benchmark-regression.sh` runs the combined `full_performance` executable and
+compares each result with `ci/benchmarks-baseline.txt`. Baseline sections are
+keyed by hardware (`# Hardware: <normalized-key>`); on GitHub Actions the key is
+`github-<ImageOS>-<arch>`. A machine without a matching section reports its
+results and skips enforcement, so a new runner image cannot fail the build before
+a baseline is recorded.
+
+Record five full repetitions on an otherwise idle machine. Store the median, the
+slowest (min), the fastest (max), and `(max-min)/median` as variability.
+`ci/benchmark-regression.sh --record` does this automatically and prints a
+section ready to paste into the baseline; `REPS` changes the repetition count.
+The **Benchmark baseline** workflow runs the same command on each CI runner image
+and publishes the sections in its job summary.
+
+Enforcement uses the recorded minimum as the floor with a 35% default tolerance
+(`TOLERANCE`), because the short lookup/read workloads still vary more than the
+streaming workload. Re-record a section whenever the workload or benchmark
+changes; mixing values from different builds produces false regressions.

@@ -8,6 +8,10 @@
 #include <stdint.h>
 
 #define ITERATIONS 30
+/* Very short operations need more samples for a stable rate; clock() has
+ * microsecond granularity and a 30-call loop finishes too close to it. */
+#define LOOKUP_ITERATIONS 5000
+#define READ_ITERATIONS 2000
 
 static uint32_t random_number(uint32_t *state) {
     *state = *state * UINT32_C(1664525) + UINT32_C(1013904223);
@@ -29,7 +33,7 @@ static void bench_path_lookups() {
     OK(fslite_mkdir(volume, "/dir1/subdir2"));
 
     clock_t start = clock();
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
+    for (int iter = 0; iter < LOOKUP_ITERATIONS; ++iter) {
         fslite_info info;
         STATUS(fslite_stat(volume, "/dir1/subdir1", &info), FSLITE_OK);
         CHECK(info.kind == 2);
@@ -39,7 +43,7 @@ static void bench_path_lookups() {
     double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
 
     printf("Path lookup benchmark (iter=%d): %.3f seconds, %.0f ops/sec\n",
-           ITERATIONS, elapsed, (double)ITERATIONS / elapsed);
+           LOOKUP_ITERATIONS, elapsed, (double)LOOKUP_ITERATIONS / elapsed);
 
     fslite_close(volume);
     CHECK(unlink(filename) == 0);
@@ -138,7 +142,7 @@ static void bench_random_access_simple() {
 
     uint32_t state = 0x51f17e;
     clock_t start = clock();
-    for (int iter = 0; iter < ITERATIONS; ++iter) {
+    for (int iter = 0; iter < READ_ITERATIONS; ++iter) {
         uint32_t offset = (random_number(&state) % file_size);
         uint32_t length = (random_number(&state) % 256) + 1;
         if ((uint64_t)offset + length > file_size) length = (uint32_t)(file_size - offset);
@@ -153,7 +157,7 @@ static void bench_random_access_simple() {
     double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
 
     printf("Random access reads benchmark (iter=%d, file_size=%zuKB): %.3f seconds, %.0f ops/sec\n",
-           ITERATIONS, file_size / 1024, elapsed, (double)ITERATIONS / elapsed);
+           READ_ITERATIONS, file_size / 1024, elapsed, (double)READ_ITERATIONS / elapsed);
 
     fslite_close(volume);
     free(data);
@@ -162,7 +166,8 @@ static void bench_random_access_simple() {
 
 int main(void) {
     printf("=== FSLite Full Performance Benchmark Suite ===\n");
-    printf("Running %d iterations per benchmark\n\n", ITERATIONS);
+    printf("Running iterations: file ops=%d, lookups=%d, reads=%d\n\n",
+           ITERATIONS, LOOKUP_ITERATIONS, READ_ITERATIONS);
 
     bench_path_lookups();
     bench_small_file_operations();

@@ -547,6 +547,18 @@ static void test_metadata_limits_stats(void) {
     STATUS(fslite_write(v, "/dir/third", "x", 1), FSLITE_TOO_LARGE);
     STATUS(fslite_stat(v, "/dir/third", &info), FSLITE_NOT_FOUND);
 
+    // A rejected replacement must roll back atomically and keep the old bytes.
+    char kept[8];
+    size_t kept_count = 0;
+    OK(fslite_read(v, "/dir/second", 0, kept, sizeof kept, &kept_count));
+    CHECK(kept_count == sizeof kept && memcmp(kept, payload, sizeof kept) == 0);
+    STATUS(fslite_write(v, "/dir/second", payload, 1001), FSLITE_TOO_LARGE);
+    kept_count = 0;
+    OK(fslite_read(v, "/dir/second", 0, kept, sizeof kept, &kept_count));
+    CHECK(kept_count == sizeof kept && memcmp(kept, payload, sizeof kept) == 0);
+    OK(fslite_inspect(v, "/dir/second", &file));
+    CHECK(file.size == 1000 && file.chunks == 1 && file.allocated == 1000);
+
     // Limits may only change while quiescent.
     OK(fslite_begin(v));
     STATUS(fslite_set_limits(v, NULL), FSLITE_INVALID_STATE);
