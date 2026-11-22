@@ -1,0 +1,40 @@
+# CMake configuration file for FSLite.
+# Generated from fsliteConfig.cmake.in
+
+include("${CMAKE_CURRENT_LIST_DIR}/fsliteConfigVersion.cmake")
+
+set(FSLITE_FOUND TRUE)
+set(FSLITE_INCLUDE_DIR "@INCLUDEDIR@")
+set(FSLITE_LIBRARY_DIR "@LIBDIR@")
+
+# Provide both static and shared import targets.
+if(NOT TARGET fslite::fslite)
+    add_library(fslite::fslite INTERFACE IMPORTED)
+    set_target_properties(fslite::fslite PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+    )
+endif()
+
+if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.a")
+    add_library(fslite_static STATIC IMPORTED)
+    set_target_properties(fslite_static PROPERTIES
+        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+    )
+endif()
+
+if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.so")
+    add_library(fslite_shared SHARED IMPORTED)
+    set_target_properties(fslite_shared PROPERTIES
+        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.so"
+        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+    )
+endif()
+
+if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.dylib")
+    add_library(fslite_shared SHARED IMPORTED)
+    set_target_properties(fslite_shared PROPERTIES
+        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.dylib"
+        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+    )
+endif()
