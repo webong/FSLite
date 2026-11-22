@@ -282,7 +282,8 @@ typedef struct fslite_backup_progress {
  * Destination and its SQLite sidecar names must be unused. Existing files,
  * directories, symlinks (even dangling), and source aliases return ALREADY_EXISTS.
  * POSIX implementation needs a local filesystem with hard links and directory
- * fsync; Windows returns UNSUPPORTED. Parent directory must exist and remain
+ * fsync. Windows publishes with a non-overwriting write-through rename and
+ * returns OK on success. Parent directory must exist and remain
  * stable/trusted during backup. No overwrite or cross-volume transaction API.
  */
 fslite_status fslite_export(fslite_volume *source, const char *destination);

@@ -18,10 +18,12 @@ loop, garbage collector, or background service.
   and freelist accounting, and transaction/sparse state.
 - Atomic rename with replacement, and removal of files or empty directories.
 - Consistent live export and incremental backups with cancellation and atomic publication.
+- POSIX and Windows host-file publication for export and backup.
 - Read-only whole-volume integrity checking, including hierarchy and chunk validation.
 - Explicit transactions spanning multiple file operations.
 - Per-operation savepoints, including inside an explicit transaction.
 - Persistent volumes, format/version checks, and rejection of foreign databases.
+- Header-only C++ RAII wrappers and a small command-line front end.
 - Bundled official SQLite 3.54.1; the host does not need to install SQLite.
 
 This is an **experimental first implementation**, not a production filesystem.
@@ -54,8 +56,10 @@ Outputs:
 
 ```text
 zig-out/include/fslite.h
+zig-out/include/fslite.hpp
 zig-out/lib/libfslite.a
 zig-out/lib/libfslite.dylib   # macOS; platform equivalent elsewhere
+zig-out/bin/fslite            # command-line front end
 ```
 
 This checkout also has a checksum-verified, ignored project-local macOS ARM64
@@ -68,8 +72,9 @@ zig build -Doptimize=ReleaseSafe
 zig build test -Doptimize=ReleaseSafe
 ```
 
-The C integration tests exercise both static and shared libraries. The test
-harness currently requires POSIX (`mkstemp`, `fork`, `waitpid`). It covers binary
+The C integration tests exercise both static and shared libraries. The full
+suite requires POSIX (`mkstemp`, `fork`, `waitpid`); Windows uses the focused
+`tests/windows_smoke.c` instead. The suite covers binary
 and empty files, partial reads, persistence, transaction isolation, writer
 contention, rollback on close/process exit, path validation, format rejection,
 and invalid ABI arguments. Streaming coverage includes uneven input fragments,
@@ -88,10 +93,14 @@ verify rollback on chunk/metadata failures, contention, and process exit.
 
 [GitHub Actions](https://github.com/webong/fslite/actions/workflows/ci.yml) builds
 and tests every push and pull request, with optional manual runs. The matrix
-covers Ubuntu 24.04 and macOS 15 in Debug and ReleaseSafe modes, using the Zig
-version in `.zig-version`. Each job checks formatting, builds and tests both
-libraries, and runs native C examples against the static and shared artifacts.
-It also verifies exported volumes and C++ compatibility of the public header.
+covers Ubuntu 24.04, macOS 15, and Windows 2025 in Debug and ReleaseSafe modes,
+using the Zig version in `.zig-version`. Each job checks formatting, builds and
+tests both libraries, and runs native C examples against the static and shared
+artifacts. It also verifies exported volumes, C++ compatibility of the public
+headers, the command-line tool, the ABI symbol list, and cross-target build/link
+checks. Windows runs a focused
+publication smoke test because the full integration suite uses POSIX process,
+signal, and fsync facilities.
 
 Run the native-consumer checks locally after building:
 
@@ -108,33 +117,37 @@ bash ci/abi-guard.sh          # compare built artifacts against the baseline
 bash ci/abi-guard.sh --update # regenerate the baseline after an intentional change
 ```
 
-Cross-target smoke testing builds and runs the C examples for several Zig targets
-(host plus common cross targets), checking static and shared linkage and volume
-integrity on each:
+Cross-target smoke testing builds the static and shared libraries for several
+Zig targets, compiles the C examples against each target's static library with
+`zig cc`, and runs the examples plus an independent SQLite integrity check for
+the host target. Non-native targets verify cross compilation and static linking;
+running them needs an emulator or a matching machine.
 
 ```sh
-bash ci/smoke-multi-target.sh                 # host-default target set
+bash ci/smoke-multi-target.sh                 # host plus common cross targets
 bash ci/smoke-multi-target.sh x86_64-linux-gnu # explicit targets
 ```
 
-Cross targets require a matching system linker. The script exits non-zero if any
-target fails to build, link, run, or pass its integrity check.
+The script exits non-zero if any target fails to build, link, run, or pass its
+integrity check.
 
 ### Release packaging
 
 `ci/package-release.sh` assembles a release tree under `zig-out/release/` after
-`zig build install`: the static/shared libraries, the public header, a
-`pkg-config` file (`lib/pkgconfig/fslite.pc`), CMake package files
-(`lib/cmake/fslite/`), and a `SHA256SUMS` manifest.
+`zig build install`: the static/shared libraries, both public headers, the
+`fslite` command-line tool, a `pkg-config` file (`lib/pkgconfig/fslite.pc`),
+CMake package files (`lib/cmake/fslite/`), and a `SHA256SUMS` manifest.
 
 ```sh
 zig build install -Doptimize=ReleaseSafe
 VERSION=0.1.0 bash ci/package-release.sh
 ```
 
-The pkg-config and CMake files embed absolute paths to the build's `zig-out`
-directory. Relocate the generated tree with the matching `--prefix`/install step
-if you need a different install root. Packaging is currently a local/release-time
+The generated pkg-config and CMake files locate their own install tree, so the
+release directory can be moved or extracted elsewhere as a unit. On macOS,
+executables linked against the shared library need an rpath or
+`DYLD_LIBRARY_PATH` until the library is installed in a standard location; the
+CMake config links the static library by default. Packaging is a local/release-time
 step; CI does not publish artifacts.
 
 ## Benchmarks
@@ -270,6 +283,61 @@ Cross-target builds can use Zig's `-Dtarget`; target builds and runtime behavior
 must be validated separately. Browser persistence is not implemented.
 Native macOS builds default to a macOS 14.0 deployment target.
 
+## Use from C++
+
+[include/fslite.hpp](include/fslite.hpp) is a header-only, move-only RAII layer
+over the C ABI. It adds no exceptions, allocations, or threads; every status is
+returned explicitly.
+
+```cpp
+#include "fslite.hpp"
+
+fslite::Volume volume;
+if (fslite::Status status = volume.open("project.fslite", FSLITE_OPEN_CREATE)) {
+    fslite::Writer writer;
+    if (writer.open(volume, "/hello.txt") && writer.write("Hello", 5) && writer.finish()) {
+        /* writer.close() is also called by the destructor. */
+    }
+}
+```
+
+Compile with C++11 or newer and link the same library artifacts as the C API:
+
+```sh
+c++ -std=c++11 -Izig-out/include examples/cpp_basic.cpp zig-out/lib/libfslite.a -o zig-out/cpp_basic
+./zig-out/cpp_basic /tmp/example.fslite
+```
+
+`get()` returns the wrapped C handle, and `release()` transfers ownership when a
+raw pointer is needed. The C host contract still applies: serialize access to one
+handle and never reenter a volume from a list callback.
+
+## Command-line tool
+
+`zig build install` also installs a small `fslite` executable built against the
+public C ABI:
+
+```sh
+fslite create project.fslite
+fslite put project.fslite /notes.txt notes.txt
+fslite ls project.fslite /
+fslite cat project.fslite /notes.txt
+fslite get project.fslite /notes.txt restored.txt
+fslite mkdir project.fslite /docs
+fslite mv project.fslite /notes.txt /docs/notes.txt
+fslite rm -r project.fslite /docs
+fslite stat project.fslite /docs/notes.txt
+fslite stats project.fslite
+fslite check project.fslite
+fslite backup project.fslite snapshot.fslite
+```
+
+`fslite version` prints the ABI revision, and `fslite help` lists commands.
+Volume paths are absolute (`/` is the root). `put` replaces or creates the
+destination file without creating missing parent directories. `rm -r` removes a
+directory tree; `rm` refuses a nonempty directory. `backup` uses the same
+non-overwriting export semantics as the library.
+
 ## Stream a file
 
 The streaming lifecycle is `fslite_writer_open`, repeated `fslite_writer_write`,
@@ -384,11 +452,13 @@ parent-directory sync failed. Do not treat it as an absent file or blindly retry
 the same path. Other publication failures do not create a destination. Source
 transactions are never committed or rolled back by backup.
 
-Publication currently targets POSIX local filesystems supporting hard links and
-directory fsync; CI covers macOS and Linux, while Windows returns UNSUPPORTED.
+Publication supports local filesystems on POSIX (hard links plus directory
+fsync) and Windows (a non-overwriting write-through rename). CI exercises the
+POSIX paths on macOS and Linux and the Windows path on a Windows runner.
 Keep the destination parent stable and trusted, and leave
-the destination and its sidecar names unused until finish returns. Backup files
-are created with owner-only permissions. No overwrite, restore-in-place, format
+the destination and its sidecar names unused until finish returns. POSIX backup
+files are created with owner-only permissions; Windows files inherit the parent
+directory's ACLs. No overwrite, restore-in-place, format
 migration, or distributed/cross-volume transaction is provided.
 
 ## Integrity checking
@@ -486,9 +556,6 @@ Completed:
 Remaining work is tracked below; each item is optional and additive to the
 existing ABI and format.
 
-- Windows host-file publication for export/backup beyond the current POSIX
-  implementation, with Windows CI coverage.
-- Language bindings (C++ RAII wrappers) and a small command-line tool.
 - Filesystem mounts (FUSE) and browser/WASM storage integration, which need
   platform-specific infrastructure outside this repository's current scope.
 
@@ -496,7 +563,9 @@ existing ABI and format.
 
 ```text
 include/fslite.h      Public C contract
+include/fslite.hpp    Header-only C++ RAII wrappers
 src/c_api.zig         ABI validation and status mapping
+src/cli.zig           Command-line front end over the C ABI
 src/engine.zig        File operations and SQLite ownership
 src/backup_file.c     Private staging and atomic host-file publication
 src/schema.sql       Native volume schema
@@ -506,10 +575,12 @@ tests/backup.c       Snapshot, cancellation, publication and failure tests
 tests/random_access.c Offset writes, truncation, byte-array model and failure tests
 tests/integrity.c    Corrupt-volume and check transaction-lifecycle tests
 tests/transactions.c Reproducible randomized transactional model tests
+tests/windows_smoke.c Windows publication and C ABI smoke test
 examples/basic.c     Minimal host application
 examples/stream.c    Bounded-buffer stdin import
 examples/backup.c    Live export to a new volume file
 examples/random_access.c Transactional patching and resizing
+examples/cpp_basic.cpp C++ RAII usage
 vendor/sqlite/       Unmodified SQLite amalgamation and provenance
 ```
 

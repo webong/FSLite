@@ -34,29 +34,65 @@ pub fn build(b: *std.Build) void {
     static.bundle_compiler_rt = true;
     static.bundle_ubsan_rt = true;
     const shared = b.addLibrary(.{ .name = "fslite", .linkage = .dynamic, .root_module = engine(b, target, optimize) });
-    b.installArtifact(static);
-    b.installArtifact(shared);
+    if (target.result.os.tag == .windows) {
+        // A static library and a DLL import library both default to
+        // lib/fslite.lib on Windows, so keep the static artifact distinct.
+        const static_install = b.addInstallArtifact(static, .{ .dest_sub_path = "fslite-static.lib" });
+        b.getInstallStep().dependOn(&static_install.step);
+        b.installArtifact(shared);
+    } else {
+        b.installArtifact(static);
+        b.installArtifact(shared);
+    }
     b.installFile("include/fslite.h", "include/fslite.h");
+    b.installFile("include/fslite.hpp", "include/fslite.hpp");
+
+    // Small command-line front end built against the public C ABI.
+    const cli_module = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    cli_module.addIncludePath(b.path("include"));
+    cli_module.linkLibrary(static);
+    const cli = b.addExecutable(.{ .name = "fslite", .root_module = cli_module });
+    b.installArtifact(cli);
 
     const test_step = b.step("test", "Run the C ABI integration tests with static and shared libraries");
-    inline for (.{ static, shared }, .{ "static", "shared" }) |lib, name| {
+    const windows_smoke_build = b.step("build-windows-smoke", "Compile the Windows host-file publication smoke test");
+    if (target.result.os.tag == .windows) {
+        // The POSIX integration tests use fork, signals, and directory fsync.
+        // Windows gets a focused portable-API plus publication smoke test.
         const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
         module.addIncludePath(b.path("include"));
-        module.addIncludePath(b.path("vendor/sqlite"));
-        module.addCSourceFile(.{ .file = b.path("tests/abi.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/namespace.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/backup.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/random_access.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/integrity.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/transactions.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/fault_injection.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.addCSourceFile(.{ .file = b.path("tests/statement_reuse.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
-        module.linkLibrary(lib);
-        // Only the static test calls SQLite directly to construct foreign-format fixtures.
-        if (comptime std.mem.eql(u8, name, "static")) module.addCMacro("FSLITE_TEST_SQLITE", "1");
-        const exe = b.addExecutable(.{ .name = "abi-" ++ name, .root_module = module });
+        module.addCSourceFile(.{ .file = b.path("tests/windows_smoke.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+        module.linkLibrary(static);
+        const exe = b.addExecutable(.{ .name = "windows-smoke-static", .root_module = module });
+        const install = b.addInstallArtifact(exe, .{});
+        windows_smoke_build.dependOn(&install.step);
         const run = b.addRunArtifact(exe);
         test_step.dependOn(&run.step);
+    } else {
+        inline for (.{ static, shared }, .{ "static", "shared" }) |lib, name| {
+            const module = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true });
+            module.addIncludePath(b.path("include"));
+            module.addIncludePath(b.path("vendor/sqlite"));
+            module.addCSourceFile(.{ .file = b.path("tests/abi.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/namespace.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/backup.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/random_access.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/integrity.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/transactions.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/fault_injection.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.addCSourceFile(.{ .file = b.path("tests/statement_reuse.c"), .flags = &.{ "-std=c11", "-Wall", "-Wextra", "-Werror" } });
+            module.linkLibrary(lib);
+            // Only the static test calls SQLite directly to construct foreign-format fixtures.
+            if (comptime std.mem.eql(u8, name, "static")) module.addCMacro("FSLITE_TEST_SQLITE", "1");
+            const exe = b.addExecutable(.{ .name = "abi-" ++ name, .root_module = module });
+            const run = b.addRunArtifact(exe);
+            test_step.dependOn(&run.step);
+        }
     }
 
     const bench_build = b.step("build-bench", "Install standalone static/shared benchmark executables");

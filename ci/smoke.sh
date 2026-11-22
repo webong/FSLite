@@ -21,12 +21,26 @@ for linkage in static shared; do
       "examples/$example.c" "${libraries[@]}" -o "$smoke_dir/$example-$linkage"
   done
 
+  "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror -Izig-out/include \
+    examples/cpp_basic.cpp "${libraries[@]}" -o "$smoke_dir/cpp_basic-$linkage"
+
   "$smoke_dir/basic-$linkage" "$smoke_dir/source-$linkage.fslite"
   "$smoke_dir/random_access-$linkage" "$smoke_dir/edited-$linkage.fslite"
   printf 'Streaming from CI\n' | "$smoke_dir/stream-$linkage" \
     "$smoke_dir/source-$linkage.fslite" /stream.txt
   "$smoke_dir/backup-$linkage" "$smoke_dir/source-$linkage.fslite" \
     "$smoke_dir/backup-$linkage.fslite"
+  "$smoke_dir/cpp_basic-$linkage" "$smoke_dir/cpp-$linkage.fslite"
+
+  cli="$PWD/zig-out/bin/fslite"
+  "$cli" version >/dev/null
+  "$cli" create "$smoke_dir/cli-$linkage.fslite"
+  printf 'CLI from CI\n' > "$smoke_dir/cli-input.txt"
+  "$cli" put "$smoke_dir/cli-$linkage.fslite" /cli.txt "$smoke_dir/cli-input.txt"
+  "$cli" get "$smoke_dir/cli-$linkage.fslite" /cli.txt "$smoke_dir/cli-output.txt"
+  cmp "$smoke_dir/cli-input.txt" "$smoke_dir/cli-output.txt"
+  "$cli" check "$smoke_dir/cli-$linkage.fslite" >/dev/null
+  "$cli" backup "$smoke_dir/cli-$linkage.fslite" "$smoke_dir/cli-backup-$linkage.fslite"
 
   python3 - "$smoke_dir" "$linkage" <<'PY'
 import pathlib
@@ -58,9 +72,17 @@ done
 
 "${CXX:-c++}" -std=c++11 -Wall -Wextra -Werror -Izig-out/include -x c++ -fsyntax-only - <<'CPP'
 #include "fslite.h"
+#include "fslite.hpp"
 static_assert(sizeof(fslite_info) == 24, "file info ABI layout");
 static_assert(sizeof(fslite_backup_progress) == 24, "backup progress ABI layout");
 int main() {
+    fslite::Volume volume;
+    fslite::Writer writer;
+    fslite::Backup backup;
+    fslite::Status status = volume.open("/does/not/exist", 0);
+    (void)writer.open(volume, "/file");
+    (void)backup.open(volume, "/backup");
+    (void)status;
     fslite_write_at(nullptr, "/file", 0, nullptr, 0);
     fslite_truncate(nullptr, "/file", 0);
     fslite_backup_close(nullptr);

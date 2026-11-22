@@ -62,3 +62,86 @@ jobs:
         run: |
           zig build build-bench -Doptimize=${{ matrix.optimize }}
           bash ci/benchmark-regression.sh
+
+  windows:
+    name: ${{ matrix.os }} / ${{ matrix.optimize }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2025]
+        optimize: [Debug, ReleaseSafe]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+          cache-key: ${{ matrix.optimize }}
+
+      - name: Verify compiler version and formatting
+        run: |
+          test "$(zig version)" = "$(cat .zig-version)"
+          zig fmt --check build.zig src/*.zig
+
+      - name: Build libraries and run Windows publication smoke test
+        run: zig build test install -Doptimize=${{ matrix.optimize }}
+
+      - name: Exercise the command-line tool
+        run: |
+          work="$RUNNER_TEMP/fslite-cli"
+          mkdir -p "$work"
+          printf 'Windows CLI\n' > "$work/input.txt"
+          ./zig-out/bin/fslite.exe create "$work/demo.fslite"
+          ./zig-out/bin/fslite.exe put "$work/demo.fslite" /input.txt "$work/input.txt"
+          ./zig-out/bin/fslite.exe get "$work/demo.fslite" /input.txt "$work/output.txt"
+          cmp "$work/input.txt" "$work/output.txt"
+          ./zig-out/bin/fslite.exe check "$work/demo.fslite"
+
+      - name: Compile the public C++ header
+        run: |
+          printf '#include "fslite.h"\n#include "fslite.hpp"\nint main() { return 0; }\n' > "$RUNNER_TEMP/header.cc"
+          zig c++ -std=c++17 -Wall -Wextra -Werror -Izig-out/include \
+            -fsyntax-only "$RUNNER_TEMP/header.cc"
+
+  cross-target:
+    name: cross-target build and link
+    runs-on: macos-15
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read pinned Zig version
+        id: zig-version
+        run: echo "version=$(cat .zig-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ steps.zig-version.outputs.version }}
+          cache-key: cross-target
+
+      - name: Build and link the C examples for several targets
+        run: |
+          bash ci/smoke-multi-target.sh \
+            aarch64-macos x86_64-macos \
+            x86_64-linux-gnu aarch64-linux-gnu \
+            x86_64-windows-gnu

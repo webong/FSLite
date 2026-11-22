@@ -1,11 +1,11 @@
-prefix=@PREFIX@
+prefix=${pcfiledir}/../..
 exec_prefix=${prefix}
-libdir=@LIBDIR@
-includedir=@INCLUDEDIR@
+libdir=${prefix}/lib
+includedir=${prefix}/include
 
 Name: FSLite
 Description: Embedded file engine with a C ABI, SQLite-backed volume format
-Version: 0.1.0
+Version: @VERSION@
 Cflags: -I${includedir}
 Libs: -L${libdir} -lfslite
 Libs.private: -lpthread -ldl -lm

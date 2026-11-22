@@ -3,9 +3,10 @@
 
 include("${CMAKE_CURRENT_LIST_DIR}/fsliteConfigVersion.cmake")
 
+get_filename_component(FSLITE_PREFIX "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
 set(FSLITE_FOUND TRUE)
-set(FSLITE_INCLUDE_DIR "@INCLUDEDIR@")
-set(FSLITE_LIBRARY_DIR "@LIBDIR@")
+set(FSLITE_INCLUDE_DIR "${FSLITE_PREFIX}/include")
+set(FSLITE_LIBRARY_DIR "${FSLITE_PREFIX}/lib")
 
 # Provide both static and shared import targets.
 if(NOT TARGET fslite::fslite)
@@ -15,26 +16,47 @@ if(NOT TARGET fslite::fslite)
     )
 endif()
 
-if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.a")
-    add_library(fslite_static STATIC IMPORTED)
-    set_target_properties(fslite_static PROPERTIES
-        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.a"
-        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
-    )
+if(WIN32)
+    if(EXISTS "${FSLITE_LIBRARY_DIR}/fslite-static.lib")
+        add_library(fslite_static STATIC IMPORTED)
+        set_target_properties(fslite_static PROPERTIES
+            IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/fslite-static.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+        )
+    endif()
+    if(EXISTS "${FSLITE_LIBRARY_DIR}/fslite.lib")
+        add_library(fslite_shared SHARED IMPORTED)
+        set_target_properties(fslite_shared PROPERTIES
+            IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/../bin/fslite.dll"
+            IMPORTED_IMPLIB "${FSLITE_LIBRARY_DIR}/fslite.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+        )
+    endif()
+else()
+    if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.a")
+        add_library(fslite_static STATIC IMPORTED)
+        set_target_properties(fslite_static PROPERTIES
+            IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.a"
+            INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+        )
+    endif()
+    if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.so")
+        add_library(fslite_shared SHARED IMPORTED)
+        set_target_properties(fslite_shared PROPERTIES
+            IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+        )
+    elseif(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.dylib")
+        add_library(fslite_shared SHARED IMPORTED)
+        set_target_properties(fslite_shared PROPERTIES
+            IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.dylib"
+            INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
+        )
+    endif()
 endif()
 
-if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.so")
-    add_library(fslite_shared SHARED IMPORTED)
-    set_target_properties(fslite_shared PROPERTIES
-        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.so"
-        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
-    )
-endif()
-
-if(EXISTS "${FSLITE_LIBRARY_DIR}/libfslite.dylib")
-    add_library(fslite_shared SHARED IMPORTED)
-    set_target_properties(fslite_shared PROPERTIES
-        IMPORTED_LOCATION "${FSLITE_LIBRARY_DIR}/libfslite.dylib"
-        INTERFACE_INCLUDE_DIRECTORIES "${FSLITE_INCLUDE_DIR}"
-    )
+if(TARGET fslite_static)
+    target_link_libraries(fslite::fslite INTERFACE fslite_static)
+elseif(TARGET fslite_shared)
+    target_link_libraries(fslite::fslite INTERFACE fslite_shared)
 endif()
