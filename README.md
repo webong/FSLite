@@ -99,6 +99,44 @@ Run the native-consumer checks locally after building:
 bash ci/smoke.sh
 ```
 
+The ABI guard verifies that the exported `fslite_*` symbols in the built static
+and shared libraries match the reviewed list in `ci/abi-symbols.txt`. It catches
+accidental additions, removals, or renames before they reach a released library:
+
+```sh
+bash ci/abi-guard.sh          # compare built artifacts against the baseline
+bash ci/abi-guard.sh --update # regenerate the baseline after an intentional change
+```
+
+Cross-target smoke testing builds and runs the C examples for several Zig targets
+(host plus common cross targets), checking static and shared linkage and volume
+integrity on each:
+
+```sh
+bash ci/smoke-multi-target.sh                 # host-default target set
+bash ci/smoke-multi-target.sh x86_64-linux-gnu # explicit targets
+```
+
+Cross targets require a matching system linker. The script exits non-zero if any
+target fails to build, link, run, or pass its integrity check.
+
+### Release packaging
+
+`ci/package-release.sh` assembles a release tree under `zig-out/release/` after
+`zig build install`: the static/shared libraries, the public header, a
+`pkg-config` file (`lib/pkgconfig/fslite.pc`), CMake package files
+(`lib/cmake/fslite/`), and a `SHA256SUMS` manifest.
+
+```sh
+zig build install -Doptimize=ReleaseSafe
+VERSION=0.1.0 bash ci/package-release.sh
+```
+
+The pkg-config and CMake files embed absolute paths to the build's `zig-out`
+directory. Relocate the generated tree with the matching `--prefix`/install step
+if you need a different install root. Packaging is currently a local/release-time
+step; CI does not publish artifacts.
+
 ## Benchmarks
 
 Run the four benchmark suites against both static and shared libraries:
@@ -436,12 +474,23 @@ The authoritative ABI is [include/fslite.h](include/fslite.h).
   SQLite symbols: hosts already embedding SQLite need a deliberate linking
   strategy before integration.
 
-## Next milestones
+## Roadmap status
 
-1. Broader fault-injection and concurrent workloads; optional recursive removal.
-2. Benchmark baselines across hardware, explicit format migration, and optional sparse storage.
+Completed:
+
+1. Broader fault-injection and concurrent workloads; recursive removal.
+2. Benchmark baselines across hardware, explicit format migration, and sparse storage.
 3. C ABI compatibility tests across platforms and release packaging.
-4. Optional bindings, CLI, filesystem mounts, and browser storage integration.
+4. Richer metadata, configurable limits, and volume diagnostics.
+
+Remaining work is tracked below; each item is optional and additive to the
+existing ABI and format.
+
+- Windows host-file publication for export/backup beyond the current POSIX
+  implementation, with Windows CI coverage.
+- Language bindings (C++ RAII wrappers) and a small command-line tool.
+- Filesystem mounts (FUSE) and browser/WASM storage integration, which need
+  platform-specific infrastructure outside this repository's current scope.
 
 ## Layout
 
